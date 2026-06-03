@@ -1,0 +1,52 @@
+{
+  "autoUpdatesChannel": "latest",
+  "theme": "dark",
+  "attribution": {
+    "commit": ""
+  },
+  "permissions": {
+    "allow": [
+      "Bash"
+    ],
+    "ask": [
+      "Bash(cd:*)",
+      "Bash(ssh:*)",
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(git fetch:*)",
+      "Bash(git clone:*)",
+      "Bash(git merge:*)",
+      "Bash(git commit:*)",
+      "Bash(git rebase:*)",
+      "Bash(git reset:*)",
+      "Bash(git revert:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git restore:*)",
+      "Bash(git add:*)",
+      "Bash(git rm:*)",
+      "Bash(git mv:*)",
+      "Bash(git apply:*)",
+      "Bash(git am:*)",
+      "Bash(git cherry-pick:*)",
+      "Bash(git clean:*)",
+      "Bash(git stash:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/Users/runegate-dev/.claude/hooks/git-write-guard.ps1",
+            "timeout": 15,
+            "statusMessage": "Checking git write-guard"
+          }
+        ]
+      }
+    ]
+  }
+}
