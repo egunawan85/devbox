@@ -12,6 +12,9 @@
 #   devbox ssh                connect (agent-forwarded) to the box
 #   devbox status             show the droplet
 #   devbox render             print the rendered cloud-init (no API calls)
+#   devbox vault up           start the in-memory OpenBao vault on the box
+#   devbox vault load <proj>  push ~/devbox-secrets/<proj>.env into the box's vault
+#   devbox vault status       is the vault running?
 #   devbox down [--yes]       destroy the droplet + firewall
 #
 # Config: deploy/devbox.conf (copy from devbox.conf.example). DO token via
@@ -270,7 +273,92 @@ cmd_down() {
   log "done. (Reused DigitalOcean SSH keys are left registered by design.)"
 }
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
+# ---- vault (in-memory OpenBao on the box, gated by SSH) --------------------
+
+resolve_host() {
+  local h; h=$(droplet_ip 2>/dev/null || true)
+  [ -n "$h" ] || { doctl_ready; h=$(droplet_ip); }
+  [ -n "$h" ] || die "no droplet named '$DROPLET_NAME'"
+  printf '%s' "$h"
+}
+
+# Convert a KEY=value .env file -> a flat JSON object (handles spaces in values).
+# Runs on the laptop; jq does the escaping.
+env_to_json() {
+  command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
+  jq -Rn '
+    reduce inputs as $line ({};
+      if ($line | test("^\\s*#")) or ($line | test("^\\s*$")) then .
+      else . + ( $line | capture("^\\s*(?<k>[^=]+?)\\s*=(?<v>.*)$") | {(.k): .v} )
+      end)
+  ' "$1"
+}
+
+# Start OpenBao in dev mode: in-memory (nothing on disk), bound to localhost only,
+# auto-unsealed. The SSH login is the access gate (E1). Idempotent.
+vault_up() {
+  local host; host=$(resolve_host)
+  ssh_box "$host" 'true'
+  log "starting in-memory OpenBao (localhost-only) on $host"
+  ssh_box "$host" 'bash -s' <<'EOF'
+set -eu
+command -v bao >/dev/null 2>&1 || { echo "bao (OpenBao) not installed on the box" >&2; exit 1; }
+addr="http://127.0.0.1:8200"
+if curl -fsS "$addr/v1/sys/health" >/dev/null 2>&1; then echo "OpenBao already running"; exit 0; fi
+mkdir -p "$HOME/.config/devbox"
+tok=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)
+nohup bao server -dev -dev-listen-address=127.0.0.1:8200 -dev-root-token-id="$tok" \
+  >"$HOME/.config/devbox/openbao.log" 2>&1 & disown || true
+for i in $(seq 1 20); do curl -fsS "$addr/v1/sys/health" >/dev/null 2>&1 && break; sleep 0.5; done
+curl -fsS "$addr/v1/sys/health" >/dev/null 2>&1 || { echo "OpenBao failed to start; see ~/.config/devbox/openbao.log" >&2; exit 1; }
+# Token to a localhost, in-memory vault — dead after reboot; the SECRET VALUES stay
+# in RAM only. Stored 0600 so the bao CLI (and apps) in this box can use it.
+umask 077
+printf 'export BAO_ADDR=%s\nexport BAO_TOKEN=%s\n' "$addr" "$tok" >"$HOME/.config/devbox/vault.env"
+printf '%s' "$tok" >"$HOME/.bao-token"
+echo "OpenBao up (in-memory). Apps: 'source ~/.config/devbox/vault.env' then 'bao kv get ...'."
+EOF
+}
+
+# Push a project's local .env into the box's vault at <mount>/<project>.
+vault_load() {
+  local proj=${1:-}; [ -n "$proj" ] || die "usage: $(basename "$0") vault load <project>"
+  local f="$SECRETS_DIR/$proj.env"
+  [ -f "$f" ] || die "no secrets file at $f"
+  local host json; host=$(resolve_host)
+  json=$(env_to_json "$f") || die "failed to parse $f"
+  ssh_box "$host" 'true'
+  log "loading $f -> vault $VAULT_MOUNT/$proj on $host"
+  printf '%s' "$json" | ssh_box "$host" "VAULT_MOUNT='$VAULT_MOUNT' PROJ='$proj' bash -s" <<'EOF'
+set -eu
+. "$HOME/.config/devbox/vault.env" 2>/dev/null || { echo "vault not up — run 'devbox vault up' first" >&2; exit 1; }
+bao kv put -mount="$VAULT_MOUNT" "$PROJ" -
+EOF
+  log "done. On the box: bao kv get -mount=$VAULT_MOUNT $proj"
+}
+
+vault_status() {
+  local host; host=$(resolve_host)
+  ssh_box "$host" 'true'
+  ssh_box "$host" 'curl -fsS http://127.0.0.1:8200/v1/sys/health >/dev/null 2>&1 \
+    && echo "OpenBao: up (in-memory, localhost-only)" \
+    || echo "OpenBao: not running — run: devbox vault up"'
+}
+
+cmd_vault() {
+  load_conf
+  : "${SECRETS_DIR:?set SECRETS_DIR in devbox.conf}"
+  : "${VAULT_MOUNT:=secret}"
+  local action=${1:-}; shift || true
+  case "$action" in
+    up)     vault_up ;;
+    load)   vault_load "$@" ;;
+    status) vault_status ;;
+    *) die "usage: $(basename "$0") vault up | load <project> | status" ;;
+  esac
+}
+
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
   local sub=${1:-help}; shift || true
@@ -280,6 +368,7 @@ main() {
     ssh)       cmd_ssh "$@" ;;
     status)    cmd_status "$@" ;;
     render)    cmd_render "$@" ;;
+    vault)     cmd_vault "$@" ;;
     down)      cmd_down "$@" ;;
     help|-h|--help) usage ;;
     *) usage; die "unknown command: $sub" ;;

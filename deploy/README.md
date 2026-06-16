@@ -29,8 +29,52 @@ deploy/devbox ssh        # connect (agent-forwarded)
 deploy/devbox status     # show the droplet
 deploy/devbox configure  # re-install config on the existing box (config-only path)
 deploy/devbox render     # print the rendered cloud-init — no API calls (safe to inspect)
+deploy/devbox vault up        # start the in-memory vault on the box
+deploy/devbox vault load myapp # push ~/devbox-secrets/myapp.env into the vault
 deploy/devbox down       # destroy droplet + firewall
 ```
+
+## Secrets — the on-box vault
+
+App secrets are served by an **OpenBao vault running on the devbox**, bound to
+`127.0.0.1`. It's reachable **only from inside an SSH session**, so your SSH login is
+the access gate. Storage is **in-memory** — secret values never touch the box's disk
+and are gone on reboot/teardown.
+
+The durable home is your **laptop**: keep one plaintext file per project under
+`~/devbox-secrets/` (the `SECRETS_DIR` in your config):
+
+```
+~/devbox-secrets/myapp.env     # KEY=value lines, edited in your editor
+```
+
+Per session:
+
+```sh
+deploy/devbox vault up          # start the vault (in-memory, localhost-only)
+deploy/devbox vault load myapp  # push myapp's secrets into the vault at secret/myapp
+```
+
+Then, on the box, an app reads them:
+
+```sh
+source ~/.config/devbox/vault.env          # sets BAO_ADDR + BAO_TOKEN for this box
+bao kv get -mount=secret myapp             # view
+# inject into a process at launch:
+export $(bao kv get -mount=secret -format=json myapp | jq -r '.data.data|to_entries[]|"\(.key)=\(.value)"')
+```
+
+Tear the box down → vault and contents are gone → `vault up` + `vault load` again next
+time.
+
+**Honest notes:**
+- OpenBao runs in **dev mode** (in-memory, auto-unsealed) — appropriate for a
+  disposable, SSH-gated, session-scoped cache; *not* a hardened production Vault.
+- The vault **token** is written to `~/.bao-token` (`0600`) on the box so `bao` and
+  your apps can talk to it. That token is a dead credential after reboot (the
+  in-memory vault is gone); the **secret values themselves are never written to disk**.
+- Same runtime caveat as always: while an app is *using* a secret, it's plaintext in
+  that process's memory.
 
 ## What you get (per the spec)
 

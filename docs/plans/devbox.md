@@ -112,22 +112,23 @@ instructions. If we want devbox-repo-specific agent guidance, add a separate roo
 - [ ] **Live apply (gated):** needs operator's DO token (`doctl auth init`) + the two
       real pubkeys + explicit go-ahead. Costs money / creates real infra.
 
-### Phase 2c — OpenBao vault on the box (`devbox vault`) — design captured (spec §E)
+### Phase 2c — OpenBao vault on the box (`devbox vault`) — 🔨 BUILT, live-pending
 _Supersedes the earlier tmpfs/sparse-shadow `devbox env` idea (reverted, never shipped)._
-- [ ] cloud-init installs **OpenBao**, configured to listen on **`127.0.0.1` only**
-      (network-unreachable; SSH login is the access gate — E1).
-- [ ] `devbox vault up`: thin helper — init + unseal OpenBao on the box; keep the
-      unseal key/token **in the SSH session / memory**, not on disk (E5). Decide the
-      storage mode (E7): in-memory vs sealed-on-disk.
-- [ ] `devbox vault load [path]`: read the operator's plaintext structured store
-      (`~/devbox-secrets/`) and write the values into the box's vault **over SSH** (E2,
-      E3). Operator edits the store in their editor.
-- [ ] App-read path: document/helper for an app on the box to read its secrets from
-      the localhost vault (e.g. `bao kv get …` or an env-injection wrapper at launch).
-- [ ] Verify (V4): load a secret → read it back only from inside an SSH session →
-      confirm the vault is unreachable from the network → nothing usable after teardown.
-- [ ] Open sub-decisions to settle while building: storage mode (E7), where the
-      durable store lives on the laptop, the vault path layout, app-read ergonomics.
+_Decisions: storage mode **in-memory** (E7); store = `~/devbox-secrets/<project>.env`;
+vault path = `secret/<project>`._
+- [x] cloud-init installs **OpenBao** (latest release .deb, fetched over TLS).
+- [x] `devbox vault up`: starts OpenBao in **dev mode** — in-memory, auto-unsealed,
+      bound to `127.0.0.1` only (SSH login is the gate — E1). Idempotent. Token to a
+      `0600` file (dead after reboot); secret *values* never hit disk.
+- [x] `devbox vault load <project>`: laptop converts `~/devbox-secrets/<project>.env`
+      → JSON (`jq`), pushes it into `secret/<project>` over SSH (E2, E3).
+- [x] `devbox vault status`; app-read path documented in `deploy/README` (source the
+      session env + `bao kv get`, or an env-injection one-liner).
+- [x] Static verify: `bash -n` clean; usage shows vault cmds; `env_to_json` unit-tested
+      locally (spaces, `=`-in-value, comments, blanks all correct).
+- [ ] **Live verify (gated, needs a box):** V4 — load a secret, read it back only from
+      inside SSH, confirm the vault is unreachable from the network, nothing after
+      teardown. Also confirm the OpenBao `.deb` asset URL/naming on a real box.
 
 ### Phase 2b — Azure / Windows (deferred)
 - [ ] Windows VM provisioning (`az` CLI or Terraform), NSG inbound 2222 only, no RDP.
@@ -223,3 +224,8 @@ _Append dated entries as work happens (newest last). Today: 2026-06-16._
   (durable home) and are pushed in per session via `devbox vault load`; the vault dies
   with the box. The SSH key authenticates *access*, not encryption. Rewrote spec §E
   (E1–E7), V4, overview, and Phase 2c on branch `feat/devbox-vault`. Building next.
+- **2026-06-16** Built Phase 2c on `feat/devbox-vault`. E7 = **in-memory** (OpenBao dev
+  mode). cloud-init installs OpenBao (latest .deb); CLI gains `vault up`/`load`/`status`
+  (localhost-bound dev server, SSH-gated; `.env`→JSON→`secret/<project>` over SSH).
+  Config + README updated. Static checks pass (`bash -n`, `env_to_json` unit-tested).
+  **Not live-verified** — needs a real box (and a check of OpenBao's `.deb` asset URL).

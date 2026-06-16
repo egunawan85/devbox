@@ -24,3 +24,9 @@ REPO_URL=git@github.com:egunawan85/devbox.git
 REPO_BRANCH=main
 # Where the repo is checked out on the box (install.sh runs from here).
 REPO_DIR=/home/eddyg/devbox
+
+# --- Secrets (devbox vault) ---
+# Local plaintext store on your laptop: one <project>.env per project (KEY=value lines).
+SECRETS_DIR="$HOME/devbox-secrets"
+# KV mount inside the box's OpenBao; a project lands at <mount>/<project>.
+VAULT_MOUNT=secret
