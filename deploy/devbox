@@ -70,6 +70,19 @@ droplet_ip() {
     | awk -v n="$DROPLET_NAME" '$1==n {print $2; exit}'
 }
 
+# `droplet create --wait` returns when the droplet is active, but its PublicIPv4 can
+# take a few more seconds to appear in the list API — so a single droplet_ip read
+# right after create intermittently comes back empty. Poll (up to ~60s) instead of
+# dying on the first empty read. Echoes the IP; non-zero if it never appeared.
+wait_for_ip() {
+  local ip i=0
+  while [ "$i" -lt 30 ]; do
+    ip=$(droplet_ip); [ -n "$ip" ] && { printf '%s' "$ip"; return 0; }
+    i=$((i + 1)); sleep 2
+  done
+  return 1
+}
+
 ensure_ssh_keys() { # echoes a comma-joined list of DO ssh-key IDs for our pubkeys
   local ids="" f fp existing name id
   for f in $SSH_PUBKEY_FILES; do
@@ -198,9 +211,9 @@ cmd_up() {
   load_conf; doctl_ready
   local ip key_ids ud
   if [ -n "$(droplet_id)" ]; then
-    ip=$(droplet_ip)
-    [ -n "$ip" ] || die "droplet '$DROPLET_NAME' exists but has no public IP yet — wait a moment and re-run (NOT creating a duplicate)"
+    ip=$(wait_for_ip) || die "droplet '$DROPLET_NAME' exists but has no public IP yet — wait a moment and re-run (NOT creating a duplicate)"
     log "droplet '$DROPLET_NAME' already exists at $ip"
+    wait_for_box "$ip"   # an existing box may still be mid cloud-init; gate on devbox-ready before configure
   else
     key_ids=$(ensure_ssh_keys)
     [ -n "$key_ids" ] || die "no ssh keys resolved"
@@ -214,7 +227,7 @@ cmd_up() {
       --ssh-keys "$key_ids" --tag-names "$TAG" \
       --user-data-file "$ud" --wait \
       --format ID,PublicIPv4 --no-header >/dev/null
-    ip=$(droplet_ip); [ -n "$ip" ] || die "droplet created but no public IP found"
+    ip=$(wait_for_ip) || die "droplet created but no public IP after ~60s — check 'doctl compute droplet get $DROPLET_NAME'"
     log "droplet at $ip"
     wait_for_box "$ip"
   fi
@@ -427,7 +440,11 @@ st=$(curl -fsS "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null) || { echo "SERVER_NOT
 out=$(bao operator init -key-shares=1 -key-threshold=1 -format=json)
 unseal=$(printf '%s' "$out" | jq -r '.unseal_keys_b64[0]')
 roottok=$(printf '%s' "$out" | jq -r '.root_token')
-printf '%s' "$unseal" | bao operator unseal - >/dev/null         # key via stdin, not argv
+# OpenBao's `operator unseal -` treats '-' as a LITERAL key (no stdin support), and the
+# no-arg form demands a TTY — so unseal via the HTTP API with the key in the JSON body
+# fed on stdin (-d @-). The key stays off argv (E5); it never appears in ps/cmdline.
+printf '{"key":"%s"}' "$unseal" | curl -fsS -X PUT -d @- "$BAO_ADDR/v1/sys/unseal" >/dev/null
+[ "$(curl -fsS "$BAO_ADDR/v1/sys/seal-status" | jq -r '.sealed')" = "false" ] || { echo "UNSEAL_FAILED" >&2; exit 6; }
 export BAO_TOKEN="$roottok"                                      # root used only for setup, here
 bao secrets enable -path=secret kv-v2 >/dev/null                 # fail loud (L3): no '|| true'
 # Least-privilege (M2): a policy scoped to the kv mount + a token bound to it. The BOX
@@ -466,8 +483,13 @@ vault_unseal() {
   fi
   local unseal; unseal=$(jq -r '.unseal_keys_b64[0]' "$VAULT_KEYS_FILE")
   [ -n "$unseal" ] && [ "$unseal" != "null" ] || die "could not read unseal key from $VAULT_KEYS_FILE"
-  printf '%s' "$unseal" | ssh_box "$host" \
-    'export BAO_ADDR="http://127.0.0.1:8200"; exec bao operator unseal -' >/dev/null
+  # Unseal via the HTTP API (key in the JSON body on stdin) — OpenBao's CLI `unseal -`
+  # treats '-' as a literal key and the no-arg form needs a TTY. Key stays off argv (E5).
+  local resp
+  resp=$(printf '{"key":"%s"}' "$unseal" | ssh_box "$host" \
+    'curl -fsS -X PUT -d @- http://127.0.0.1:8200/v1/sys/unseal')
+  [ "$(printf '%s' "$resp" | jq -r '.sealed' 2>/dev/null)" = "false" ] \
+    || die "unseal failed (vault still sealed) — verify the key in $VAULT_KEYS_FILE matches this box"
   log "vault unsealed."
 }
 
