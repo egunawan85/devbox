@@ -6,12 +6,12 @@
 
 ## Status
 
-- **Phase:** 0 done → 1 next (installers).
-- **Branch/worktree:** working in `main` (uncommitted edits + new docs made a clean
-  worktree branch impractical; checkpoint commit pending approval).
-- **Next action:** Phase 1 — write `install.sh` (+ `install.ps1`), dogfood on macOS.
-- **Blocked on:** nothing for Phase 1. `deploy/` (Phase 2) is gated on the open
-  decisions below.
+- **Phase:** 0 ✅, 1 ✅ (Linux) → 2 next (provisioning). `install.ps1` carried into
+  Phase 2.
+- **Branch:** `feat/devbox-scaffold` (in-place branch off `main`; carries the work).
+- **Next action:** Phase 2 — `deploy/` provisioning. First resolve open decisions
+  Q1–Q5 below; then DO (Linux) Terraform + the `devbox` CLI.
+- **Blocked on:** Q1–Q5 before `deploy/` work has a stable target.
 
 ## Target repo structure
 
@@ -67,16 +67,22 @@ instructions. If we want devbox-repo-specific agent guidance, add a separate roo
 - [ ] Q6: decide whether to add a separate root `CLAUDE.md` for repo-local agent
       guidance (recommend: skip for now).
 
-### Phase 1 — installers (C1, C2)
-- [ ] `install.sh` (Linux) + `install.ps1` (Windows): idempotently link `CLAUDE.md`,
-      `settings.json`, `hooks/` into `~/.claude/`; preserve `settings.local.json`.
-- [ ] Dogfood `install.sh` on this Mac; verify the guard fires.
+### Phase 1 — Linux installer (C1, C2) — ✅ DONE
+- [x] `install.sh`: idempotently symlink `CLAUDE.md`, `settings.json`,
+      `hooks/git-write-guard.js` into `~/.claude/`; preserve `settings.local.json`;
+      back up (never clobber) pre-existing real files. Honors `CLAUDE_HOME` override.
+- [x] Dogfooded into a throwaway `CLAUDE_HOME` on this Mac: links created,
+      local settings preserved, hook fires via installed path, idempotent on re-run.
+- [→] `install.ps1` (Windows) deferred to Phase 2 — no `pwsh` here to verify it;
+      written & tested on the Azure box alongside Windows bring-up.
 
 ### Phase 2 — provisioning (P, D, N, A)
 - [ ] `deploy/digitalocean/` Terraform: Ubuntu droplet, `eddyg` (sudo), upload the
       two device public keys, firewall = deny inbound / open outbound.
 - [ ] `deploy/azure/` Terraform: Windows Server VM + OpenSSH, `eddyg` (admin), keys,
       NSG = deny inbound / open outbound, no RDP.
+- [ ] `install.ps1` (Windows): mirror `install.sh` (symlink payload into `~/.claude`,
+      preserve `settings.local.json`, idempotent); verify on the Azure box.
 - [ ] Network: firewall opens one non-default SSH port, key-only, no IP allowlist;
       all other inbound denied.
 - [ ] SSH: register laptop + desktop public keys; print/template an operator
@@ -124,4 +130,12 @@ _Append dated entries as work happens (newest last). Today: 2026-06-16._
   removed it. Replaced both planned `.sh`+`.ps1` guards with a single cross-OS
   `claude-config/hooks/git-write-guard.js` (Node); 24/24 cases pass. Repointed the
   `settings.json` hook to `node "$HOME/.claude/hooks/git-write-guard.js"`. Repo/dir
-  not yet renamed to `devbox`; no commit yet.
+  not yet renamed to `devbox` (holding until GitHub push). Committed checkpoint
+  `fe16acb` on branch `feat/devbox-scaffold`. Q6 resolved: no separate root
+  `CLAUDE.md` for now.
+- **2026-06-16** Phase 1. Added `claude-config/install.sh` — idempotent symlink
+  installer (CLAUDE.md, settings.json, hooks/git-write-guard.js → ~/.claude), preserves
+  `settings.local.json`, backs up pre-existing real files, honors `CLAUDE_HOME`.
+  Verified into a throwaway home: links ok, local settings preserved, guard fires via
+  the installed `$HOME`-relative path, idempotent on re-run. `install.ps1` deferred to
+  Phase 2 (no pwsh locally to verify).
