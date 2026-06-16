@@ -238,3 +238,11 @@ _Append dated entries as work happens (newest last). Today: 2026-06-16._
   (init+unseal+enable kv+save keys to laptop), `vault unseal` (re-unseal from saved
   key), plus `load`/`status`. Unseal key + root token travel via stdin/env only (never
   argv). Updated spec §E1/E5/E7, README, plan. Static checks pass; live-pending.
+- **2026-06-16** Prod-mode vault RTs. Internal: fixed the README app-read one-liner
+  (`export $(...)` → `set -a; eval … @sh`, injection-safe) and an ambiguous init error.
+  External #2 (credential handling PASSED): fixed H1 (flock fd leaked into `bao server`
+  → 2nd `vault up` hung; close `9>&-` + `flock -w`), M1 (interrupted-init catch-22 →
+  detect unrecoverable + tell operator to re-provision), M2 (least-privilege: box gets a
+  `devbox-app` token scoped to `secret/*`, not root; root stays on laptop), L1–L4. Branch
+  `feat/devbox-vault` @ a19d02d. Two RT worktrees still on disk (devbox-vault-rt,
+  devbox-vault-rt2). Live-pending.
