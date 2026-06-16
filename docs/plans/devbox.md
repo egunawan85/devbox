@@ -113,22 +113,24 @@ instructions. If we want devbox-repo-specific agent guidance, add a separate roo
       real pubkeys + explicit go-ahead. Costs money / creates real infra.
 
 ### Phase 2c — OpenBao vault on the box (`devbox vault`) — 🔨 BUILT, live-pending
-_Supersedes the earlier tmpfs/sparse-shadow `devbox env` idea (reverted, never shipped)._
-_Decisions: storage mode **in-memory** (E7); store = `~/devbox-secrets/<project>.env`;
-vault path = `secret/<project>`._
-- [x] cloud-init installs **OpenBao** (latest release .deb, fetched over TLS).
-- [x] `devbox vault up`: starts OpenBao in **dev mode** — in-memory, auto-unsealed,
-      bound to `127.0.0.1` only (SSH login is the gate — E1). Idempotent. Token to a
-      `0600` file (dead after reboot); secret *values* never hit disk.
-- [x] `devbox vault load <project>`: laptop converts `~/devbox-secrets/<project>.env`
-      → JSON (`jq`), pushes it into `secret/<project>` over SSH (E2, E3).
-- [x] `devbox vault status`; app-read path documented in `deploy/README` (source the
-      session env + `bao kv get`, or an env-injection one-liner).
-- [x] Static verify: `bash -n` clean; usage shows vault cmds; `env_to_json` unit-tested
-      locally (spaces, `=`-in-value, comments, blanks all correct).
-- [ ] **Live verify (gated, needs a box):** V4 — load a secret, read it back only from
-      inside SSH, confirm the vault is unreachable from the network, nothing after
-      teardown. Also confirm the OpenBao `.deb` asset URL/naming on a real box.
+_Decisions (final): **OpenBao production mode** (`file` storage, sealed-on-disk),
+single unseal key (1-of-1), **re-init per box**; store = `~/devbox-secrets/<project>.env`;
+vault path = `secret/<project>`. (Dev/in-memory mode removed.)_
+- [x] cloud-init installs **OpenBao** (pinned `.deb` + SHA256-verified).
+- [x] `devbox vault up`: writes the prod HCL config (file storage, listener on
+      `127.0.0.1`, TLS off), starts `bao server`, reports initialized/sealed + next step.
+- [x] `devbox vault init`: `operator init -key-shares=1 -key-threshold=1`, unseal,
+      enable kv-v2 at `secret/`, install root token on box (0600), save unseal key +
+      root token to the laptop (`vault-keys.json`, 0600). Keys/token via stdin/env only.
+- [x] `devbox vault unseal`: re-unseal from the saved laptop key (post-reboot).
+- [x] `devbox vault load <project>`: `.env` → JSON (`jq`) → `secret/<project>` over SSH.
+- [x] `devbox vault status`; app-read path documented in `deploy/README`.
+- [x] Static verify: `bash -n` clean; no dev-mode remnants; usage shows all vault cmds;
+      `env_to_json` unit-tested (export/CRLF/spaces/`=`/junk).
+- [ ] **Live verify (gated, needs a box):** V4 — up → init → load → read back only from
+      inside SSH → confirm 8200 unreachable from the network → nothing after teardown.
+      Confirm: prod `bao server` starts as `eddyg`, `operator init/unseal` flow, kv-v2
+      `-mount=secret`, and `bao kv put -` stdin JSON all behave on a real box.
 
 ### Phase 2b — Azure / Windows (deferred)
 - [ ] Windows VM provisioning (`az` CLI or Terraform), NSG inbound 2222 only, no RDP.
@@ -229,3 +231,10 @@ _Append dated entries as work happens (newest last). Today: 2026-06-16._
   (localhost-bound dev server, SSH-gated; `.env`→JSON→`secret/<project>` over SSH).
   Config + README updated. Static checks pass (`bash -n`, `env_to_json` unit-tested).
   **Not live-verified** — needs a real box (and a check of OpenBao's `.deb` asset URL).
+- **2026-06-16** Switched OpenBao **dev mode → production mode** (operator preference;
+  "use root key", then "remove dev mode"). Now: `file` storage (sealed/encrypted on
+  disk), listener on `127.0.0.1` TLS-off, single unseal key (1-of-1), **re-init per
+  box** (E7). New CLI: `vault up` (start server, report status), `vault init`
+  (init+unseal+enable kv+save keys to laptop), `vault unseal` (re-unseal from saved
+  key), plus `load`/`status`. Unseal key + root token travel via stdin/env only (never
+  argv). Updated spec §E1/E5/E7, README, plan. Static checks pass; live-pending.

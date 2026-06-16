@@ -12,9 +12,11 @@
 #   devbox ssh                connect (agent-forwarded) to the box
 #   devbox status             show the droplet
 #   devbox render             print the rendered cloud-init (no API calls)
-#   devbox vault up           start the in-memory OpenBao vault on the box
+#   devbox vault up           ensure the OpenBao server is running on the box
+#   devbox vault init         init + unseal a fresh box (saves keys to your laptop)
+#   devbox vault unseal       re-unseal an existing box from your saved key
 #   devbox vault load <proj>  push ~/devbox-secrets/<proj>.env into the box's vault
-#   devbox vault status       is the vault running?
+#   devbox vault status       initialized / sealed?
 #   devbox down [--yes]       destroy the droplet + firewall
 #
 # Config: deploy/devbox.conf (copy from devbox.conf.example). DO token via
@@ -273,7 +275,7 @@ cmd_down() {
   log "done. (Reused DigitalOcean SSH keys are left registered by design.)"
 }
 
-# ---- vault (in-memory OpenBao on the box, gated by SSH) --------------------
+# ---- vault (prod-mode OpenBao on the box, gated by SSH) --------------------
 
 resolve_host() {
   local h; h=$(droplet_ip 2>/dev/null || true)
@@ -294,36 +296,102 @@ env_to_json() {
   ' "$1"
 }
 
-# Start OpenBao in dev mode: in-memory (nothing on disk), bound to localhost only,
-# auto-unsealed. The SSH login is the access gate (E1). Idempotent.
+# Ensure the OpenBao server is running on the box: prod (real) mode, `file` storage
+# (encrypted at rest on disk), listener bound to 127.0.0.1 only (SSH login is the
+# access gate — E1). Does NOT init/unseal (those are explicit). Reports next step.
 vault_up() {
   local host; host=$(resolve_host)
   ssh_box "$host" 'true'
-  log "starting in-memory OpenBao (localhost-only) on $host"
-  ssh_box "$host" 'bash -s' <<'EOF'
+  log "ensuring OpenBao server (prod mode, file storage, localhost-only) is up on $host"
+  local status
+  status=$(ssh_box "$host" 'bash -s' <<'EOF'
 set -eu
-umask 077   # FIRST: everything we create below (incl. the dev-mode log that echoes
-            # the root token) is owner-only 0600/700 — not world-readable (H-1).
-command -v bao >/dev/null 2>&1 || { echo "bao (OpenBao) not installed on the box" >&2; exit 1; }
-mkdir -p "$HOME/.config/devbox"
-exec 9>"$HOME/.config/devbox/vault.lock"; flock 9   # serialize concurrent 'vault up' (L-1)
-addr="http://127.0.0.1:8200"
-if curl -fsS "$addr/v1/sys/health" >/dev/null 2>&1; then echo "OpenBao already running"; exit 0; fi
-log="$HOME/.config/devbox/openbao.log"
-tok=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)
-# Token via ENVIRONMENT, not argv: /proc/<pid>/environ is owner-only, so 'ps' /
-# /proc/<pid>/cmdline can't leak the root token to other local users (H-2).
-BAO_DEV_ROOT_TOKEN_ID="$tok" \
-  nohup bao server -dev -dev-listen-address=127.0.0.1:8200 >"$log" 2>&1 & disown || true
-for i in $(seq 1 20); do curl -fsS "$addr/v1/sys/health" >/dev/null 2>&1 && break; sleep 0.5; done
-curl -fsS "$addr/v1/sys/health" >/dev/null 2>&1 || { echo "OpenBao failed to start; see $log" >&2; exit 1; }
-# The SECRET VALUES live in RAM only (dev mode). The root TOKEN is written to these
-# owner-only files (and is in $log) so the bao CLI/apps can use it; it's a dead
-# credential once the in-memory vault is gone (reboot/teardown).
-printf 'export BAO_ADDR=%s\nexport BAO_TOKEN=%s\n' "$addr" "$tok" >"$HOME/.config/devbox/vault.env"
-printf '%s' "$tok" >"$HOME/.bao-token"
-echo "OpenBao up (in-memory). Apps: 'source ~/.config/devbox/vault.env' then 'bao kv get ...'."
+umask 077                                   # owner-only files/dirs
+command -v bao >/dev/null 2>&1 || { echo '{"error":"bao not installed"}'; exit 0; }
+cfgdir="$HOME/.config/devbox"
+mkdir -p "$cfgdir/openbao-data"
+exec 9>"$cfgdir/vault.lock"; flock 9        # serialize concurrent starts
+cfg="$cfgdir/openbao.hcl"
+if [ ! -f "$cfg" ]; then
+  cat > "$cfg" <<HCL
+storage "file" {
+  path = "$cfgdir/openbao-data"
+}
+listener "tcp" {
+  address     = "127.0.0.1:8200"
+  tls_disable = true
+}
+disable_mlock = true
+ui            = false
+HCL
+fi
+export BAO_ADDR="http://127.0.0.1:8200"
+# /sys/seal-status answers 200 even when sealed/uninitialized — use it as the up-probe.
+if ! curl -fsS "$BAO_ADDR/v1/sys/seal-status" >/dev/null 2>&1; then
+  nohup bao server -config="$cfg" >"$cfgdir/openbao.log" 2>&1 & disown || true
+  for i in $(seq 1 30); do curl -fsS "$BAO_ADDR/v1/sys/seal-status" >/dev/null 2>&1 && break; sleep 0.5; done
+fi
+curl -fsS "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null || echo '{"error":"server not responding"}'
 EOF
+)
+  local err inited sealed
+  err=$(printf '%s' "$status" | jq -r '.error // empty' 2>/dev/null || true)
+  [ -z "$err" ] || die "vault up: $err (see ~/.config/devbox/openbao.log on the box)"
+  # NB: jq '//' treats boolean false as empty, so '.sealed // true' is WRONG for an
+  # unsealed vault. Read raw and compare explicitly: initialized only if exactly "true";
+  # sealed unless exactly "false".
+  inited=$(printf '%s' "$status" | jq -r '.initialized' 2>/dev/null || echo false)
+  sealed=$(printf '%s' "$status" | jq -r '.sealed'      2>/dev/null || echo true)
+  if   [ "$inited" != "true"  ]; then log "server up, NOT initialized — run: $(basename "$0") vault init"
+  elif [ "$sealed" != "false" ]; then log "server up but SEALED — run: $(basename "$0") vault unseal"
+  else log "vault up and unsealed."; fi
+}
+
+# First time on a box: initialize (single unseal key), unseal, enable the kv mount,
+# install the root token on the box, and save the unseal key + root token to the
+# LAPTOP keys file. Re-init per box: a fresh box gets fresh keys.
+vault_init() {
+  command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
+  local host; host=$(resolve_host)
+  ssh_box "$host" 'true'
+  log "initializing + unsealing vault on $host (1 key share, single unseal key)"
+  local out
+  out=$(ssh_box "$host" 'bash -s' <<'EOF'
+set -eu
+umask 077
+export BAO_ADDR="http://127.0.0.1:8200"
+[ "$(curl -fsS "$BAO_ADDR/v1/sys/seal-status" | jq -r '.initialized')" = "false" ] \
+  || { echo "ALREADY_INITIALIZED" >&2; exit 3; }
+# Init output (unseal key + root token) stays in box memory; never on argv.
+out=$(bao operator init -key-shares=1 -key-threshold=1 -format=json)
+unseal=$(printf '%s' "$out" | jq -r '.unseal_keys_b64[0]')
+roottok=$(printf '%s' "$out" | jq -r '.root_token')
+printf '%s' "$unseal" | bao operator unseal - >/dev/null         # key via stdin, not argv
+mkdir -p "$HOME/.config/devbox"
+printf 'export BAO_ADDR=%s\nexport BAO_TOKEN=%s\n' "$BAO_ADDR" "$roottok" > "$HOME/.config/devbox/vault.env"
+printf '%s' "$roottok" > "$HOME/.bao-token"
+BAO_TOKEN="$roottok" bao secrets enable -path=secret kv-v2 >/dev/null 2>&1 || true
+printf '%s' "$out"                                                # emit JSON for the laptop
+EOF
+) || die "vault init failed (already initialized? then run: $(basename "$0") vault unseal)"
+  [ -n "$out" ] || die "vault init produced no keys"
+  umask 077; mkdir -p "$(dirname "$VAULT_KEYS_FILE")"
+  printf '%s' "$out" > "$VAULT_KEYS_FILE"
+  log "vault initialized + unsealed. Keys saved to $VAULT_KEYS_FILE"
+  warn "KEEP $VAULT_KEYS_FILE SAFE — it holds this box's unseal key + root token."
+}
+
+# Re-unseal an already-initialized box (e.g. after a reboot) using the saved key.
+vault_unseal() {
+  command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
+  [ -f "$VAULT_KEYS_FILE" ] || die "no saved keys at $VAULT_KEYS_FILE — init this box first: $(basename "$0") vault init"
+  local unseal; unseal=$(jq -r '.unseal_keys_b64[0]' "$VAULT_KEYS_FILE")
+  [ -n "$unseal" ] && [ "$unseal" != "null" ] || die "could not read unseal key from $VAULT_KEYS_FILE"
+  local host; host=$(resolve_host)
+  ssh_box "$host" 'true'
+  printf '%s' "$unseal" | ssh_box "$host" \
+    'export BAO_ADDR="http://127.0.0.1:8200"; exec bao operator unseal -' >/dev/null
+  log "vault unsealed."
 }
 
 # Push a project's local .env into the box's vault at <mount>/<project>.
@@ -349,25 +417,28 @@ vault_load() {
 vault_status() {
   local host; host=$(resolve_host)
   ssh_box "$host" 'true'
-  ssh_box "$host" 'curl -fsS http://127.0.0.1:8200/v1/sys/health >/dev/null 2>&1 \
-    && echo "OpenBao: up (in-memory, localhost-only)" \
-    || echo "OpenBao: not running — run: devbox vault up"'
+  ssh_box "$host" 'export BAO_ADDR="http://127.0.0.1:8200"
+    s=$(curl -fsS "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null) || { echo "OpenBao: not running — run: devbox vault up"; exit 0; }
+    echo "OpenBao: running (localhost-only); initialized=$(printf "%s" "$s" | jq -r .initialized) sealed=$(printf "%s" "$s" | jq -r .sealed)"'
 }
 
 cmd_vault() {
   load_conf
   : "${SECRETS_DIR:?set SECRETS_DIR in devbox.conf}"
   : "${VAULT_MOUNT:=secret}"
+  VAULT_KEYS_FILE="${VAULT_KEYS_FILE:-$HOME/.config/devbox/vault-keys.json}"
   local action=${1:-}; shift || true
   case "$action" in
     up)     vault_up ;;
+    init)   vault_init ;;
+    unseal) vault_unseal ;;
     load)   vault_load "$@" ;;
     status) vault_status ;;
-    *) die "usage: $(basename "$0") vault up | load <project> | status" ;;
+    *) die "usage: $(basename "$0") vault up | init | unseal | load <project> | status" ;;
   esac
 }
 
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
   local sub=${1:-help}; shift || true

@@ -29,35 +29,41 @@ deploy/devbox ssh        # connect (agent-forwarded)
 deploy/devbox status     # show the droplet
 deploy/devbox configure  # re-install config on the existing box (config-only path)
 deploy/devbox render     # print the rendered cloud-init — no API calls (safe to inspect)
-deploy/devbox vault up        # start the in-memory vault on the box
+deploy/devbox vault up        # ensure the OpenBao server is running on the box
+deploy/devbox vault init      # first time on a box: init + unseal, saves keys to laptop
 deploy/devbox vault load myapp # push ~/devbox-secrets/myapp.env into the vault
 deploy/devbox down       # destroy droplet + firewall
 ```
 
 ## Secrets — the on-box vault
 
-App secrets are served by an **OpenBao vault running on the devbox**, bound to
-`127.0.0.1`. It's reachable **only from inside an SSH session**, so your SSH login is
-the access gate. Storage is **in-memory** — secret values never touch the box's disk
-and are gone on reboot/teardown.
+App secrets are served by an **OpenBao vault running on the devbox in production mode**,
+bound to `127.0.0.1`. It's reachable **only from inside an SSH session**, so your SSH
+login is the access gate. Storage is a `file` backend — the vault's data is **encrypted
+at rest on disk** ("sealed") and unusable until you unseal it with your key.
 
-The durable home is your **laptop**: keep one plaintext file per project under
-`~/devbox-secrets/` (the `SECRETS_DIR` in your config):
+The durable home for the *values* is your **laptop**: keep one plaintext file per
+project under `~/devbox-secrets/` (the `SECRETS_DIR` in your config):
 
 ```
 ~/devbox-secrets/myapp.env     # KEY=value lines, edited in your editor
 ```
 
 Values are taken **literally** — `KEY=value` stores `value`; `KEY="value"` stores the
-quotes too. Don't wrap values in quotes unless you want the quotes included. Lines that
-aren't a valid `NAME=value` (comments, blanks, junk) are ignored.
+quotes too. `export KEY=value` is fine; comments/blanks/junk are ignored; CRLF is
+tolerated.
 
-Per session:
+First time on a fresh box, then per project:
 
 ```sh
-deploy/devbox vault up          # start the vault (in-memory, localhost-only)
-deploy/devbox vault load myapp  # push myapp's secrets into the vault at secret/myapp
+deploy/devbox vault up          # start the server (it comes up SEALED)
+deploy/devbox vault init        # init + unseal; saves the unseal key + root token to
+                                #   ~/.config/devbox/vault-keys.json on your laptop
+deploy/devbox vault load myapp  # push myapp's secrets to secret/myapp
 ```
+
+If the box reboots, the vault re-seals — `deploy/devbox vault unseal` reopens it from
+your saved key (no re-init).
 
 Then, on the box, an app reads them:
 
@@ -68,23 +74,23 @@ bao kv get -mount=secret myapp             # view
 export $(bao kv get -mount=secret -format=json myapp | jq -r '.data.data|to_entries[]|"\(.key)=\(.value)"')
 ```
 
-Tear the box down → vault and contents are gone → `vault up` + `vault load` again next
-time.
+Tear the box down → its vault storage and keys are gone → on the next box, `vault up` +
+`vault init` + `vault load` again (**re-init per box**: each box gets fresh keys).
 
 **Honest notes:**
-- OpenBao runs in **dev mode** (in-memory, auto-unsealed) — appropriate for a
-  disposable, SSH-gated, session-scoped cache; *not* a hardened production Vault.
-- **Secret values** live in RAM only and are never written to the box's disk.
-- The vault's **root token**, however, *is* on disk — in owner-only `0600` files
-  (`~/.config/devbox/vault.env`, `~/.bao-token`) and in the dev-mode log
-  (`~/.config/devbox/openbao.log`, also `0600`) so `bao`/your apps can talk to the
-  vault. It's a **dead credential after reboot** (the in-memory vault is gone). It is
-  *not* passed on the command line, so `ps` / `/proc/<pid>/cmdline` can't leak it.
-- Net: the vault is reachable only from inside an SSH session (network-isolated +
-  owner-only token), so your SSH login is the gate — but any code already running as
-  `eddyg` can read the token and thus the secrets (the inherent runtime exposure).
-- Same runtime caveat as always: while an app is *using* a secret, it's plaintext in
-  that process's memory.
+- **Production mode**, single unseal key (1-of-1). The vault starts **sealed**
+  (encrypted on disk); your **unseal key lives on your laptop** (`vault-keys.json`,
+  `0600`) and is fed in per session — the box never stores the unseal key.
+- The **root token** is needed for `load`/reads, so it's written to owner-only `0600`
+  files on the box (`vault.env`, `~/.bao-token`). It (and the unseal key) are never
+  passed on the command line — they travel via stdin/env, so `ps` / `/proc/<pid>/cmdline`
+  can't leak them.
+- On a DigitalOcean droplet there's no swap, so `disable_mlock=true` doesn't risk
+  paging secret memory to disk.
+- Net: the vault is network-isolated (localhost-only) and sealed at rest — your SSH
+  login is the gate. The residual is the inherent runtime exposure: any code running as
+  `eddyg` while the vault is *unsealed* can read the token, and a secret in use is
+  plaintext in that process's memory.
 
 ## What you get (per the spec)
 
