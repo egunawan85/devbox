@@ -90,6 +90,16 @@ ensure_ssh_keys() { # echoes a comma-joined list of DO ssh-key IDs for our pubke
   printf '%s' "$ids"
 }
 
+# DO's firewall API requires any tag referenced in --tag-names to ALREADY exist
+# (unlike droplet create, which auto-creates tags). The firewall is created before
+# the first droplet, so we must create the tag up-front. Idempotent.
+ensure_tag() {
+  doctl compute tag get "$TAG" >/dev/null 2>&1 && return 0
+  log "creating tag '$TAG'"
+  doctl compute tag create "$TAG" >/dev/null \
+    || die "failed to create tag '$TAG'"
+}
+
 # The firewall is the ONLY control enforcing "inbound 2222 only" (N1), so we never
 # trust a name match blindly — we reconcile it to spec every run (H2). DO's firewall
 # update/create both take the full desired state, so we just (re)assert it.
@@ -125,11 +135,24 @@ render_cloud_init() { # -> stdout
   # Inject the key block at the marker via awk ENVIRON (handles multi-line cleanly,
   # unlike -v; no temp file to leak — L2), then substitute the simple scalars
   # (validated in load_conf, so no sed-injection — L1).
-  KEYS_BLOCK="$keys" awk '
+  local out
+  out=$(KEYS_BLOCK="$keys" awk '
     $0 == "__AUTHORIZED_KEYS_BLOCK__" { printf "%s", ENVIRON["KEYS_BLOCK"]; next }
     { print }
   ' "$TEMPLATE" \
-    | sed -e "s/__DEVBOX_USER__/$DEVBOX_USER/g" -e "s/__SSH_PORT__/$SSH_PORT/g"
+    | sed -e "s/__DEVBOX_USER__/$DEVBOX_USER/g" -e "s/__SSH_PORT__/$SSH_PORT/g")
+  # Guard: a single non-ASCII byte (smart quote, em-dash, NBSP) makes DO's cloud-init
+  # datasource reject the ENTIRE user-data as "empty cloud config" -- silently skipping
+  # the users block, packages, and runcmd. Fail loudly here instead of shipping a box
+  # that boots without the eddyg user or toolchain. (LC_ALL=C + POSIX classes so this
+  # works on BSD grep too -- `grep -P` is GNU-only and not present on macOS.)
+  local nonascii
+  nonascii=$(printf '%s' "$out" | LC_ALL=C grep -n '[^[:print:][:space:]]' || true)
+  if [ -n "$nonascii" ]; then
+    printf '%s\n' "$nonascii" >&2
+    die "rendered cloud-init contains non-ASCII byte(s) (see line(s) above) -- DO's cloud-init would silently discard the whole config. Replace them with ASCII."
+  fi
+  printf '%s\n' "$out"
 }
 
 # NON-forwarded ssh (no -A). Used to wait/verify/pin the host key, so the agent is
@@ -181,6 +204,7 @@ cmd_up() {
   else
     key_ids=$(ensure_ssh_keys)
     [ -n "$key_ids" ] || die "no ssh keys resolved"
+    ensure_tag        # firewall's --tag-names requires the tag to pre-exist
     ensure_firewall
     ud=$(mktemp); trap 'rm -f "$ud"' EXIT
     render_cloud_init >"$ud"

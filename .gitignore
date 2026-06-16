@@ -2,6 +2,10 @@
 # but machine-specific) — never commit.
 deploy/devbox.conf
 
+# Operator's plaintext secret store (one <project>.env per project, pushed into the
+# box's vault by `devbox vault load`). PLAINTEXT SECRETS — never commit.
+/secrets/
+
 # Local Claude session overrides.
 .claude/settings.local.json
 

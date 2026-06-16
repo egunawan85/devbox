@@ -5,7 +5,7 @@
 # user, the SSH port, and the list of authorized public keys before upload.
 # It sets up the box and user, hardens SSH, and installs the toolchain.
 #
-# It deliberately does NOT clone the repo or store any secret — the repo clone and
+# It deliberately does NOT clone the repo or store any secret -- the repo clone and
 # config install happen later in `devbox configure`, over an agent-forwarded SSH
 # session (so a private repo uses the operator's forwarded key, not a key at rest).
 
@@ -91,5 +91,5 @@ runcmd:
       sleep 1
     done
     ss -ltn | grep -q ":__SSH_PORT__ " || { echo "FATAL: sshd not listening on __SSH_PORT__" >&2; exit 1; }
-    command -v bao >/dev/null || { echo "FATAL: OpenBao (bao) missing — provisioning incomplete" >&2; exit 1; }
+    command -v bao >/dev/null || { echo "FATAL: OpenBao (bao) missing -- provisioning incomplete" >&2; exit 1; }
     touch /var/lib/cloud/devbox-ready
