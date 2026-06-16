@@ -23,15 +23,23 @@ state file** (DigitalOcean itself is the source of truth). Contract:
 
 ## Usage
 
+**One command does everything:**
+
 ```sh
-deploy/devbox up         # provision (if absent) + configure, end to end
+deploy/devbox up         # provision + configure + vault (init/unseal) + load all secrets
+```
+
+`up` is idempotent — run it again any time to re-converge (re-configure, re-unseal a
+rebooted vault, re-load secrets). The rest are for granular control / day-to-day:
+
+```sh
 deploy/devbox ssh        # connect (agent-forwarded)
 deploy/devbox status     # show the droplet
-deploy/devbox configure  # re-install config on the existing box (config-only path)
+deploy/devbox configure  # re-install config only (existing box)
 deploy/devbox render     # print the rendered cloud-init — no API calls (safe to inspect)
-deploy/devbox vault up        # ensure the OpenBao server is running on the box
-deploy/devbox vault init      # first time on a box: init + unseal, saves keys to laptop
-deploy/devbox vault load myapp # push ~/devbox-secrets/myapp.env into the vault
+deploy/devbox vault up        # bring the vault to ready (start + init/unseal as needed)
+deploy/devbox vault load myapp # (re)push one project's ~/devbox-secrets/myapp.env
+deploy/devbox vault status    # initialized / sealed?
 deploy/devbox down       # destroy droplet + firewall
 ```
 
@@ -53,13 +61,15 @@ Values are taken **literally** — `KEY=value` stores `value`; `KEY="value"` sto
 quotes too. `export KEY=value` is fine; comments/blanks/junk are ignored; CRLF is
 tolerated.
 
-First time on a fresh box, then per project:
+**`devbox up` already does all of the vault setup** — it brings OpenBao up, runs
+`init` on a fresh box (saving the unseal key + root token to
+`~/.config/devbox/vault-keys.json` on your laptop), unseals, and loads every
+`~/devbox-secrets/*.env`. The individual commands below are only for granular control:
 
 ```sh
-deploy/devbox vault up          # start the server (it comes up SEALED)
-deploy/devbox vault init        # init + unseal; saves the unseal key + root token to
-                                #   ~/.config/devbox/vault-keys.json on your laptop
-deploy/devbox vault load myapp  # push myapp's secrets to secret/myapp
+deploy/devbox vault up          # start + init/unseal (same readiness as `up`)
+deploy/devbox vault unseal      # re-unseal after a reboot, from your saved key
+deploy/devbox vault load myapp  # (re)push just one project to secret/myapp
 ```
 
 If the box reboots, the vault re-seals — `deploy/devbox vault unseal` reopens it from

@@ -7,12 +7,13 @@
 # session. No Terraform, no state file — DigitalOcean itself is the source of truth.
 #
 # Usage:
-#   devbox up                 provision (if absent) + configure
+#   devbox up                 ALL-IN-ONE: provision (if absent) + configure + vault
+#                               ready (init/unseal) + load every ~/devbox-secrets/*.env
 #   devbox configure [--host H]   (re)install config on an existing box
 #   devbox ssh                connect (agent-forwarded) to the box
 #   devbox status             show the droplet
 #   devbox render             print the rendered cloud-init (no API calls)
-#   devbox vault up           ensure the OpenBao server is running on the box
+#   devbox vault up           bring the vault to ready (start + init/unseal as needed)
 #   devbox vault init         init + unseal a fresh box (saves keys to your laptop)
 #   devbox vault unseal       re-unseal an existing box from your saved key
 #   devbox vault load <proj>  push ~/devbox-secrets/<proj>.env into the box's vault
@@ -43,6 +44,10 @@ load_conf() {
   case "$SSH_PORT" in ''|*[!0-9]*) die "SSH_PORT must be numeric, got '$SSH_PORT'";; esac
   [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] || die "SSH_PORT out of range"
   case "$DEVBOX_USER" in ''|*[!a-zA-Z0-9_-]*) die "DEVBOX_USER has invalid chars: '$DEVBOX_USER'";; esac
+  # Vault defaults (used by `up` and `vault …`).
+  : "${VAULT_MOUNT:=secret}"
+  : "${SECRETS_DIR:=$HOME/devbox-secrets}"
+  VAULT_KEYS_FILE="${VAULT_KEYS_FILE:-$HOME/.config/devbox/vault-keys.json}"
 }
 
 doctl_ready() {
@@ -163,31 +168,37 @@ cmd_status() {
   [ -n "$ip" ] && log "ssh: ssh -A -p $SSH_PORT $DEVBOX_USER@$ip" || log "no droplet named '$DROPLET_NAME'"
 }
 
+# One command, end to end: provision (if absent) -> configure -> vault ready
+# (start + init/unseal as needed) -> load every ~/devbox-secrets/<proj>.env.
+# Idempotent: re-running on an existing box just re-converges every step.
 cmd_up() {
   load_conf; doctl_ready
+  local ip key_ids ud
   if [ -n "$(droplet_id)" ]; then
-    local ip; ip=$(droplet_ip)
+    ip=$(droplet_ip)
     [ -n "$ip" ] || die "droplet '$DROPLET_NAME' exists but has no public IP yet — wait a moment and re-run (NOT creating a duplicate)"
-    log "droplet '$DROPLET_NAME' already exists at $ip — running configure only"
-    cmd_configure --host "$ip"
-    return
+    log "droplet '$DROPLET_NAME' already exists at $ip"
+  else
+    key_ids=$(ensure_ssh_keys)
+    [ -n "$key_ids" ] || die "no ssh keys resolved"
+    ensure_firewall
+    ud=$(mktemp); trap 'rm -f "$ud"' EXIT
+    render_cloud_init >"$ud"
+    log "creating droplet '$DROPLET_NAME' ($SIZE, $IMAGE, $REGION)"
+    doctl compute droplet create "$DROPLET_NAME" \
+      --region "$REGION" --size "$SIZE" --image "$IMAGE" \
+      --ssh-keys "$key_ids" --tag-names "$TAG" \
+      --user-data-file "$ud" --wait \
+      --format ID,PublicIPv4 --no-header >/dev/null
+    ip=$(droplet_ip); [ -n "$ip" ] || die "droplet created but no public IP found"
+    log "droplet at $ip"
+    wait_for_box "$ip"
   fi
-  local key_ids ud ip
-  key_ids=$(ensure_ssh_keys)
-  [ -n "$key_ids" ] || die "no ssh keys resolved"
-  ensure_firewall
-  ud=$(mktemp); trap 'rm -f "$ud"' EXIT
-  render_cloud_init >"$ud"
-  log "creating droplet '$DROPLET_NAME' ($SIZE, $IMAGE, $REGION)"
-  doctl compute droplet create "$DROPLET_NAME" \
-    --region "$REGION" --size "$SIZE" --image "$IMAGE" \
-    --ssh-keys "$key_ids" --tag-names "$TAG" \
-    --user-data-file "$ud" --wait \
-    --format ID,PublicIPv4 --no-header >/dev/null
-  ip=$(droplet_ip); [ -n "$ip" ] || die "droplet created but no public IP found"
-  log "droplet at $ip"
-  wait_for_box "$ip"
   cmd_configure --host "$ip"
+  VAULT_HOST="$ip"            # reuse this IP for the vault steps (no extra lookups)
+  vault_bringup              # start OpenBao + init/unseal as needed
+  vault_load_all             # push every ~/devbox-secrets/<proj>.env
+  log "devbox ready — connect: $(basename "$0") ssh"
 }
 
 cmd_configure() {
@@ -284,6 +295,9 @@ resolve_host() {
   printf '%s' "$h"
 }
 
+# Use the IP `up` already resolved (VAULT_HOST) if set, else look it up.
+vault_host() { if [ -n "${VAULT_HOST:-}" ]; then printf '%s' "$VAULT_HOST"; else resolve_host; fi; }
+
 # Convert a KEY=value .env file -> a flat JSON object (handles spaces/`=` in values).
 # Runs on the laptop; jq does the escaping. Robust: lines that aren't a valid
 # `NAME=value` (comments, blanks, junk) are skipped, not errored (capture(...)? ).
@@ -296,15 +310,13 @@ env_to_json() {
   ' "$1"
 }
 
-# Ensure the OpenBao server is running on the box: prod (real) mode, `file` storage
-# (encrypted at rest on disk), listener bound to 127.0.0.1 only (SSH login is the
-# access gate — E1). Does NOT init/unseal (those are explicit). Reports next step.
-vault_up() {
-  local host; host=$(resolve_host)
+# Start the OpenBao server on the box: prod mode, `file` storage (encrypted at rest),
+# listener bound to 127.0.0.1 only (SSH login is the access gate — E1). Echoes the
+# seal-status JSON (or {"error":...}). Idempotent (no-op if already running).
+vault_start() {
+  local host=$1
   ssh_box "$host" 'true'
-  log "ensuring OpenBao server (prod mode, file storage, localhost-only) is up on $host"
-  local status
-  status=$(ssh_box "$host" 'bash -s' <<'EOF'
+  ssh_box "$host" 'bash -s' <<'EOF'
 set -eu
 umask 077                                   # owner-only files/dirs
 command -v bao >/dev/null 2>&1 || { echo '{"error":"bao not installed"}'; exit 0; }
@@ -337,18 +349,39 @@ if ! curl -fsS "$BAO_ADDR/v1/sys/seal-status" >/dev/null 2>&1; then
 fi
 curl -fsS "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null || echo '{"error":"server not responding"}'
 EOF
-)
-  local err inited sealed
+}
+
+# Bring the vault to READY: start the server, then init (fresh box) or unseal (sealed)
+# as needed. Idempotent. Used by both `up` and `vault up`.
+vault_bringup() {
+  local host; host=$(vault_host)
+  log "bringing up the vault on $host"
+  local status err inited sealed
+  status=$(vault_start "$host")
   err=$(printf '%s' "$status" | jq -r '.error // empty' 2>/dev/null || true)
-  [ -z "$err" ] || die "vault up: $err (see ~/.config/devbox/openbao.log on the box)"
-  # NB: jq '//' treats boolean false as empty, so '.sealed // true' is WRONG for an
-  # unsealed vault. Read raw and compare explicitly: initialized only if exactly "true";
-  # sealed unless exactly "false".
+  [ -z "$err" ] || die "vault: $err (see ~/.config/devbox/openbao.log on the box)"
+  # NB: jq '//' treats boolean false as empty, so read raw and compare explicitly:
+  # initialized only if exactly "true"; sealed unless exactly "false".
   inited=$(printf '%s' "$status" | jq -r '.initialized' 2>/dev/null || echo false)
   sealed=$(printf '%s' "$status" | jq -r '.sealed'      2>/dev/null || echo true)
-  if   [ "$inited" != "true"  ]; then log "server up, NOT initialized — run: $(basename "$0") vault init"
-  elif [ "$sealed" != "false" ]; then log "server up but SEALED — run: $(basename "$0") vault unseal"
-  else log "vault up and unsealed."; fi
+  if   [ "$inited" != "true"  ]; then vault_init
+  elif [ "$sealed" != "false" ]; then vault_unseal
+  else log "vault already initialized + unsealed."; fi
+}
+
+# `devbox vault up` — same readiness as part of `devbox up`.
+vault_up() { vault_bringup; }
+
+# Push every ~/devbox-secrets/<project>.env into the vault (used by `up`).
+vault_load_all() {
+  [ -d "$SECRETS_DIR" ] || { log "no secrets dir ($SECRETS_DIR) — skipping secret load"; return 0; }
+  local any=0 f
+  for f in "$SECRETS_DIR"/*.env; do
+    [ -e "$f" ] || continue
+    any=1
+    vault_load "$(basename "$f" .env)"
+  done
+  [ "$any" = 1 ] || log "no <project>.env files in $SECRETS_DIR — skipping secret load"
 }
 
 # First time on a box: initialize (single unseal key), unseal, enable the kv mount,
@@ -356,7 +389,7 @@ EOF
 # LAPTOP keys file. Re-init per box: a fresh box gets fresh keys.
 vault_init() {
   command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
-  local host; host=$(resolve_host)
+  local host; host=$(vault_host)
   ssh_box "$host" 'true'
   log "initializing + unsealing vault on $host (1 key share, single unseal key)"
   local out
@@ -396,7 +429,7 @@ EOF
 # Re-unseal an already-initialized box (e.g. after a reboot) using the saved key.
 vault_unseal() {
   command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
-  local host; host=$(resolve_host)
+  local host; host=$(vault_host)
   ssh_box "$host" 'true'
   if [ ! -f "$VAULT_KEYS_FILE" ]; then
     # No saved key. If the box's vault is nonetheless initialized, the unseal key was
@@ -421,7 +454,7 @@ vault_load() {
   case "$VAULT_MOUNT" in ''|-*|*[!a-zA-Z0-9._-]*) die "invalid VAULT_MOUNT: '$VAULT_MOUNT'";; esac
   local f="$SECRETS_DIR/$proj.env"
   [ -f "$f" ] || die "no secrets file at $f"
-  local host json; host=$(resolve_host)
+  local host json; host=$(vault_host)
   json=$(env_to_json "$f") || die "failed to parse $f"
   ssh_box "$host" 'true'
   # Friendly pre-check: a sealed vault would otherwise give a raw 503 (L1).
@@ -440,7 +473,7 @@ vault_load() {
 }
 
 vault_status() {
-  local host; host=$(resolve_host)
+  local host; host=$(vault_host)
   ssh_box "$host" 'true'
   ssh_box "$host" 'export BAO_ADDR="http://127.0.0.1:8200"
     s=$(curl -fsS "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null) || { echo "OpenBao: not running — run: devbox vault up"; exit 0; }
@@ -448,10 +481,7 @@ vault_status() {
 }
 
 cmd_vault() {
-  load_conf
-  : "${SECRETS_DIR:?set SECRETS_DIR in devbox.conf}"
-  : "${VAULT_MOUNT:=secret}"
-  VAULT_KEYS_FILE="${VAULT_KEYS_FILE:-$HOME/.config/devbox/vault-keys.json}"
+  load_conf   # sets VAULT_MOUNT / SECRETS_DIR / VAULT_KEYS_FILE defaults
   local action=${1:-}; shift || true
   case "$action" in
     up)     vault_up ;;
@@ -463,7 +493,7 @@ cmd_vault() {
   esac
 }
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
   local sub=${1:-help}; shift || true
