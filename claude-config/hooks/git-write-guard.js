@@ -33,8 +33,9 @@ function gitSubcommand(segment) {
   let s = segment.trim();
   if (s === '') return null;
   let m;
-  // strip leading env-var assignments: FOO=bar BAZ=qux git ...
-  while ((m = /^[A-Za-z_][A-Za-z0-9_]*=\S*\s+(.*)$/.exec(s))) s = m[1].trim();
+  // strip leading env-var assignments: FOO=bar BAZ="/a b" git ...
+  // (value may be quoted and contain spaces).
+  while ((m = /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+(.*)$/.exec(s))) s = m[1].trim();
   // strip PowerShell call / dot-source operators: & git ..., &"git" ..., . git ...
   while ((m = /^&\s*(.*)$/.exec(s)) || (m = /^\.\s+(.*)$/.exec(s))) s = m[1].trim();
   // extract the executable: quoted (may contain spaces) or first bare token
@@ -76,6 +77,18 @@ function main() {
   }
   if (!cmd.trim()) process.exit(0);
 
+  const ask = (sub) => {
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'ask',
+        permissionDecisionReason:
+          `git '${sub}' is a write/network operation - requires your approval`,
+      },
+    }));
+    process.exit(0);
+  };
+
   // Split on shell operators ( && || ; | newline ) and PowerShell block /
   // subexpression delimiters ( { } ( ) ) so wrapped commands like
   // `if ($?) { git push }` or `$(git push)` still surface their git segment.
@@ -84,18 +97,22 @@ function main() {
   const segments = cmd.split(/&&|\|\||[;|\n{}()]/);
   for (const seg of segments) {
     const sub = gitSubcommand(seg);
-    if (sub && WRITE_SUBS.has(sub)) {
-      process.stdout.write(JSON.stringify({
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'ask',
-          permissionDecisionReason:
-            `git '${sub}' is a write/network operation - requires your approval`,
-        },
-      }));
-      process.exit(0);
-    }
+    if (sub && WRITE_SUBS.has(sub)) ask(sub);
   }
+
+  // Wrapper fallback (defends against bypasses where git isn't the segment's leaf):
+  //   sh -c 'git push' · bash -c "git push" · eval 'git push' · xargs git push
+  // Precisely parsing the nested payload is fragile across quoting, so bias toward a
+  // (safe) ask: if a known wrapper appears AND a `git <write-subcommand>` sequence is
+  // present anywhere, gate it. False positives only cost a spurious prompt.
+  const WRAPPER = /\b(?:sh|bash|zsh|dash|ksh|pwsh|powershell|eval|xargs)\b/i;
+  const writeAlt = [...WRITE_SUBS].join('|');
+  const GIT_WRITE = new RegExp(`\\bgit\\b[\\s\\S]{0,40}?\\b(${writeAlt})\\b`);
+  if (WRAPPER.test(cmd)) {
+    const m = GIT_WRITE.exec(cmd);
+    if (m) ask(m[1].toLowerCase());
+  }
+
   process.exit(0);
 }
 

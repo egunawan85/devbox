@@ -22,7 +22,10 @@ Each requirement is observable — you can check whether a given box satisfies i
 - **D3** Both `provision` and `configure` are **idempotent / convergent**: re-running
   reconciles to spec rather than erroring or duplicating.
 - **D4** `destroy` tears a provisioned box down with **one command**, leaving no
-  orphaned resources (disks, firewalls, keys, IPs).
+  orphaned **billable** resources (droplet, disks, firewall, IPs). _Carve-out:_
+  reused DigitalOcean **SSH keys** (public, free, bounded to one per device key) are
+  intentionally left registered; `destroy` also prunes the box from the operator's
+  `known_hosts` so a recycled IP won't trip a host-key mismatch.
 - **D5** Provider tokens/credentials are supplied via env or a git-ignored local
   file. **No secret is ever committed.**
 - **D6** Re-creating a box from the repo at a given revision yields an **equivalent

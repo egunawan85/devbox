@@ -101,6 +101,13 @@ instructions. If we want devbox-repo-specific agent guidance, add a separate roo
       (ignores `devbox.conf`).
 - [x] Static verification: `bash -n` clean; `render` produces valid cloud-init YAML
       (ruby-checked), correct substitution, exactly 2 keys, no leftover placeholders.
+- [x] External red-team (no Critical) → fixed H1 (existence keyed on name, not IP →
+      no duplicate droplet), H2 (firewall reconciled to spec every run, not name-only),
+      M1 (verify sshd listener on port; don't swallow socket-restart failure),
+      M2 (no agent forwarding until host key pinned), M3 (pin GitHub host keys in
+      cloud-init; strict clone), M4 (guard wrapper bypasses + quoted-env regex),
+      M5 (prune known_hosts on down; spec D4 carve-out for keys), L1/L2/L4. L3/L5
+      documented. Re-verified: bash OK, guard 19/19, render valid YAML.
 - [ ] **Live apply (gated):** needs operator's DO token (`doctl auth init`) + the two
       real pubkeys + explicit go-ahead. Costs money / creates real infra.
 
@@ -190,3 +197,12 @@ _Append dated entries as work happens (newest last). Today: 2026-06-16._
   short-lived creds / dev-vs-prod split / target-pulls-own-secrets). Vault deferred
   (lean SOPS+age; HashiCorp Vault overkill). Queued as Phase 2c (post-RT). Discussed
   SSH-agent-forwarding mechanics (challenge-response signing) for vault unlock.
+- **2026-06-16** External RT came back (no Critical; 2 High, 5 Medium, 5 Low). Worked
+  through all: fixed H1, H2, M1–M5, L1, L2, L4 in `deploy/devbox` + `cloud-init.yaml` +
+  `git-write-guard.js`; documented L3/L5; amended spec D4 (SSH-key carve-out).
+  Notable: dropped agent forwarding until the host key is pinned (M2); reconcile the
+  firewall every run since it's the sole N1 control (H2); existence keyed on droplet
+  name not IP to avoid a duplicate billable droplet (H1); guard gained a conservative
+  wrapper fallback for `sh -c`/`eval`/`xargs git` (M4). Re-verified statically (bash
+  -n, guard 19/19, render→valid YAML, L1 rejects bad input). RT worktree
+  `/Users/eddyg/Dev/proj/devbox-rt` can be removed. Still gated: live `up`.

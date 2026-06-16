@@ -46,13 +46,37 @@ deploy/devbox down       # destroy droplet + firewall
 - **Claude**: run `claude` and log in.
 - **GitHub API**: `gh auth login` (git itself already works via SSH).
 
-## Gotchas
+## Security notes & gotchas
 
+- **Agent forwarding only after the host key is pinned.** The CLI's first contact to a
+  box is **without** `-A`; it pins the host key (`accept-new`), and only then does
+  `configure`/`ssh` forward your agent with strict key checking. This stops a MITM on
+  first connect from harvesting your forwarded agent. Residual: the host key itself is
+  trusted on first use (TOFU) — for maximum assurance, read the box's host-key
+  fingerprint from the DigitalOcean console and pre-seed `known_hosts`.
+- **GitHub host keys are pinned on the box.** `cloud-init` fetches GitHub's host keys
+  over TLS into `/etc/ssh/ssh_known_hosts`, so the box's clone uses strict checking (no
+  TOFU on GitHub). If that fetch fails at boot, the first clone fails loudly rather than
+  trusting an unknown key.
 - **Recovery if a box gets stuck mid-boot.** SSH is reachable only on 2222 *after*
   cloud-init applies the port change; the firewall blocks 22 the whole time. If
-  cloud-init fails before that, use the **DigitalOcean web console** to get in.
+  cloud-init fails before that (or sshd can't bind 2222 — in which case `devbox-ready`
+  is deliberately not written and `up` reports a timeout), use the **DigitalOcean web
+  console** to get in.
 - **Ubuntu 24.04 SSH socket.** 24.04 socket-activates SSH, so the listening port is
-  set by `ssh.socket`, not just `sshd_config`. `cloud-init.yaml` overrides both.
+  set by `ssh.socket`, not just `sshd_config`. `cloud-init.yaml` overrides both, then
+  verifies sshd is actually listening on the port before signaling ready.
 - **Two operator machines.** Register both public keys in `SSH_PUBKEY_FILES` so you
   can reach the box from either. No state to sync between them.
-- `down` leaves your DigitalOcean-registered SSH keys in place (reused next time).
+- **`SSH_PUBKEY_FILES` paths can't contain spaces** (space/newline-separated list).
+- **`down`** deletes the droplet + firewall and prunes the box from your `known_hosts`,
+  but **leaves your DigitalOcean SSH keys registered** (public, free, reused — see spec
+  D4 carve-out).
+- **Supply chain.** `cloud-init` installs Node via the NodeSource script and `gh` /
+  Claude Code from upstream over TLS — inherent to from-scratch provisioning on an
+  outbound-open box. Pin versions/checksums if you want to harden this.
+- **git-write-guard coverage.** The guard gates direct git writes and common wrapped
+  forms, plus a conservative fallback for `sh -c`/`bash -c`/`eval`/`xargs git`. Known
+  *not* covered: a git write hidden behind a shell keyword (`...; then git push`) or
+  fed to `xargs` via stdin (`echo push | xargs git`). It's a safety prompt, not a
+  sandbox — never the sole control.

@@ -34,6 +34,10 @@ load_conf() {
   : "${DROPLET_NAME:?}" "${REGION:?}" "${SIZE:?}" "${IMAGE:?}" "${TAG:?}"
   : "${FIREWALL_NAME:?}" "${DEVBOX_USER:?}" "${SSH_PORT:?}" "${SSH_PUBKEY_FILES:?}"
   : "${REPO_URL:?}" "${REPO_BRANCH:?}" "${REPO_DIR:?}"
+  # Validate the values that get interpolated into sed/ssh/cloud-init (guards L1).
+  case "$SSH_PORT" in ''|*[!0-9]*) die "SSH_PORT must be numeric, got '$SSH_PORT'";; esac
+  [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] || die "SSH_PORT out of range"
+  case "$DEVBOX_USER" in ''|*[!a-zA-Z0-9_-]*) die "DEVBOX_USER has invalid chars: '$DEVBOX_USER'";; esac
 }
 
 doctl_ready() {
@@ -43,6 +47,13 @@ doctl_ready() {
 }
 
 # ---- DigitalOcean helpers (idempotent: DO is the state) --------------------
+
+# Existence is keyed on NAME, not IP — a droplet can exist before its IP is
+# assigned, and keying on IP would let `up` create a duplicate (H1).
+droplet_id() {
+  doctl compute droplet list --format ID,Name --no-header \
+    | awk -v n="$DROPLET_NAME" '$2==n {print $1; exit}'
+}
 
 droplet_ip() {
   doctl compute droplet list --format Name,PublicIPv4 --no-header \
@@ -69,43 +80,54 @@ ensure_ssh_keys() { # echoes a comma-joined list of DO ssh-key IDs for our pubke
   printf '%s' "$ids"
 }
 
+# The firewall is the ONLY control enforcing "inbound 2222 only" (N1), so we never
+# trust a name match blindly — we reconcile it to spec every run (H2). DO's firewall
+# update/create both take the full desired state, so we just (re)assert it.
 ensure_firewall() {
-  local existing
-  existing=$(doctl compute firewall list --format Name --no-header \
-    | awk -v n="$FIREWALL_NAME" '$1==n {print; exit}')
-  if [ -n "$existing" ]; then
-    log "firewall '$FIREWALL_NAME' already exists"
-    return
+  local id inbound outbound
+  inbound="protocol:tcp,ports:$SSH_PORT,address:0.0.0.0/0,address:::/0"
+  outbound="protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0 protocol:icmp,address:0.0.0.0/0,address:::/0"
+  id=$(doctl compute firewall list --format ID,Name --no-header \
+    | awk -v n="$FIREWALL_NAME" '$2==n {print $1; exit}')
+  if [ -n "$id" ]; then
+    log "reconciling firewall '$FIREWALL_NAME' to spec (inbound tcp/$SSH_PORT only, tag '$TAG', outbound open)"
+    doctl compute firewall update "$id" \
+      --name "$FIREWALL_NAME" --tag-names "$TAG" \
+      --inbound-rules "$inbound" --outbound-rules "$outbound" \
+      --format ID --no-header >/dev/null \
+      || die "failed to reconcile firewall '$FIREWALL_NAME' — refusing to proceed (N1 control unverified)"
+  else
+    log "creating firewall '$FIREWALL_NAME' (inbound tcp/$SSH_PORT only, outbound open)"
+    doctl compute firewall create \
+      --name "$FIREWALL_NAME" --tag-names "$TAG" \
+      --inbound-rules "$inbound" --outbound-rules "$outbound" \
+      --format ID --no-header >/dev/null
   fi
-  log "creating firewall '$FIREWALL_NAME' (inbound tcp/$SSH_PORT only, outbound open)"
-  doctl compute firewall create \
-    --name "$FIREWALL_NAME" \
-    --tag-names "$TAG" \
-    --inbound-rules "protocol:tcp,ports:$SSH_PORT,address:0.0.0.0/0,address:::/0" \
-    --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0 protocol:icmp,address:0.0.0.0/0,address:::/0" \
-    --format ID --no-header >/dev/null
 }
 
 render_cloud_init() { # -> stdout
-  local f kt
-  kt=$(mktemp)
+  local f keys=""
   for f in $SSH_PUBKEY_FILES; do
     [ -f "$f" ] || die "ssh public key not found: $f"
-    printf '      - %s\n' "$(cat "$f")" >>"$kt"
+    keys="${keys}      - $(cat "$f")
+"
   done
-  # Inject the key block at the marker via getline (portable; BSD awk rejects
-  # multi-line -v values), then substitute the simple scalars.
-  awk -v keyfile="$kt" '
-    $0 == "__AUTHORIZED_KEYS_BLOCK__" { while ((getline l < keyfile) > 0) print l; close(keyfile); next }
+  # Inject the key block at the marker via awk ENVIRON (handles multi-line cleanly,
+  # unlike -v; no temp file to leak — L2), then substitute the simple scalars
+  # (validated in load_conf, so no sed-injection — L1).
+  KEYS_BLOCK="$keys" awk '
+    $0 == "__AUTHORIZED_KEYS_BLOCK__" { printf "%s", ENVIRON["KEYS_BLOCK"]; next }
     { print }
   ' "$TEMPLATE" \
     | sed -e "s/__DEVBOX_USER__/$DEVBOX_USER/g" -e "s/__SSH_PORT__/$SSH_PORT/g"
-  rm -f "$kt"
 }
 
-ssh_box() { # ssh into the box (agent-forwarded); args appended to ssh
+# NON-forwarded ssh (no -A). Used to wait/verify/pin the host key, so the agent is
+# never exposed to an unverified host on first contact (M2). accept-new pins the key
+# on first use, then refuses a changed key thereafter.
+ssh_box() {
   local ip=$1; shift
-  ssh -A -p "$SSH_PORT" \
+  ssh -p "$SSH_PORT" \
       -o StrictHostKeyChecking=accept-new \
       -o ConnectTimeout=10 \
       "$DEVBOX_USER@$ip" "$@"
@@ -138,13 +160,14 @@ cmd_status() {
 
 cmd_up() {
   load_conf; doctl_ready
-  local ip; ip=$(droplet_ip)
-  if [ -n "$ip" ]; then
+  if [ -n "$(droplet_id)" ]; then
+    local ip; ip=$(droplet_ip)
+    [ -n "$ip" ] || die "droplet '$DROPLET_NAME' exists but has no public IP yet — wait a moment and re-run (NOT creating a duplicate)"
     log "droplet '$DROPLET_NAME' already exists at $ip — running configure only"
     cmd_configure --host "$ip"
     return
   fi
-  local key_ids ud
+  local key_ids ud ip
   key_ids=$(ensure_ssh_keys)
   [ -n "$key_ids" ] || die "no ssh keys resolved"
   ensure_firewall
@@ -164,20 +187,27 @@ cmd_up() {
 
 cmd_configure() {
   load_conf
-  local host=""
+  local host="" os="linux"
   while [ $# -gt 0 ]; do
     case "$1" in
       --host) host=$2; shift 2 ;;
+      --os)   os=$2; shift 2 ;;
       *) die "configure: unknown arg $1" ;;
     esac
   done
+  [ "$os" = "linux" ] || die "configure: --os '$os' not supported yet (Linux only; Windows is Phase 2b)"
   if [ -z "$host" ]; then doctl_ready; host=$(droplet_ip); fi
   [ -n "$host" ] || die "no host — pass --host or provision first"
+  # Pin the box host key WITHOUT forwarding the agent first, so the agent is never
+  # exposed to an unverified host (M2). After this, -A uses strict verification.
+  ssh_box "$host" 'true'
   log "configuring $DEVBOX_USER@$host (clone/pull repo + install config)"
-  ssh_box "$host" "bash -s" <<EOF
+  ssh -A -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+      "$DEVBOX_USER@$host" "bash -s" <<EOF
 set -euo pipefail
-# Accept GitHub's host key non-interactively (clone runs over the forwarded agent).
-export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new'
+# GitHub's host keys were pre-seeded into /etc/ssh/ssh_known_hosts by cloud-init;
+# require them (no TOFU) so a MITM on first clone can't harvest the forwarded agent (M3).
+export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=yes'
 if [ -d "$REPO_DIR/.git" ]; then
   git -C "$REPO_DIR" fetch origin "$REPO_BRANCH" && git -C "$REPO_DIR" checkout "$REPO_BRANCH" && git -C "$REPO_DIR" pull --ff-only
 else
@@ -206,7 +236,8 @@ cmd_ssh() {
   local ip; ip=$(droplet_ip 2>/dev/null || true)
   [ -n "$ip" ] || { doctl_ready; ip=$(droplet_ip); }
   [ -n "$ip" ] || die "no droplet named '$DROPLET_NAME'"
-  exec ssh -A -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new "$DEVBOX_USER@$ip"
+  ssh_box "$ip" 'true'   # pin host key (no agent) before forwarding (M2)
+  exec ssh -A -p "$SSH_PORT" -o StrictHostKeyChecking=yes "$DEVBOX_USER@$ip"
 }
 
 cmd_down() {
@@ -222,6 +253,10 @@ cmd_down() {
   if [ -n "$ip" ]; then
     log "deleting droplet '$DROPLET_NAME'"
     doctl compute droplet delete "$DROPLET_NAME" --force
+    # Prune the box from known_hosts so a recycled IP doesn't trip a key mismatch (M5).
+    log "pruning $ip from your known_hosts"
+    ssh-keygen -R "[$ip]:$SSH_PORT" >/dev/null 2>&1 || true
+    ssh-keygen -R "$ip" >/dev/null 2>&1 || true
   fi
   local fw_id
   fw_id=$(doctl compute firewall list --format ID,Name --no-header \
@@ -230,7 +265,9 @@ cmd_down() {
     log "deleting firewall '$FIREWALL_NAME'"
     doctl compute firewall delete "$fw_id" --force
   fi
-  log "done. (DigitalOcean-registered SSH keys are left in place.)"
+  # Reused DO SSH keys (public, free, one per device key) are intentionally left
+  # registered — see spec D4 carve-out.
+  log "done. (Reused DigitalOcean SSH keys are left registered by design.)"
 }
 
 usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }

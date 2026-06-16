@@ -58,9 +58,21 @@ runcmd:
   - apt-get install -y gh nodejs
   # --- Claude Code CLI ---
   - npm install -g @anthropic-ai/claude-code
-  # --- Apply SSH port change (reload socket + restart service) ---
-  - systemctl daemon-reload
-  - systemctl restart ssh.socket || true
-  - systemctl restart ssh
-  # --- Signal completion marker for the operator's wait loop ---
-  - touch /var/lib/cloud/devbox-ready
+  # --- Pin GitHub's host keys (fetched over TLS) so the box's git clone needs no
+  #     TOFU; self-updates if GitHub rotates keys (M3) ---
+  - 'curl -fsSL https://api.github.com/meta | jq -r ".ssh_keys[] | \"github.com \" + ." >> /etc/ssh/ssh_known_hosts'
+  # --- Apply SSH port change, then VERIFY the listener is on the right port before
+  #     signaling ready. Do NOT swallow a socket-restart failure (M1): if sshd ends
+  #     up stranded on 22 (firewalled), fail loudly and leave devbox-ready absent so
+  #     the operator's wait loop times out instead of reporting false success. ---
+  - |
+    set -e
+    systemctl daemon-reload
+    systemctl restart ssh.socket
+    systemctl restart ssh
+    for i in $(seq 1 15); do
+      ss -ltn | grep -q ":__SSH_PORT__ " && break
+      sleep 1
+    done
+    ss -ltn | grep -q ":__SSH_PORT__ " || { echo "FATAL: sshd not listening on __SSH_PORT__" >&2; exit 1; }
+    touch /var/lib/cloud/devbox-ready
