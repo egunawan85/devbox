@@ -75,23 +75,31 @@ set -a; eval "$(bao kv get -mount=secret -format=json myapp \
   | jq -r '.data.data | to_entries[] | "\(.key)=\(.value|@sh)"')"; set +a
 ```
 
+> Note: `@sh` makes *values* injection-safe, but the **key** becomes an env var name —
+> so don't name a secret after a shell-sensitive variable (`PATH`, `LD_PRELOAD`,
+> `BASH_ENV`, …). `vault load` only accepts `NAME=value` keys, which keeps this safe.
+
 Tear the box down → its vault storage and keys are gone → on the next box, `vault up` +
 `vault init` + `vault load` again (**re-init per box**: each box gets fresh keys).
 
 **Honest notes:**
 - **Production mode**, single unseal key (1-of-1). The vault starts **sealed**
-  (encrypted on disk); your **unseal key lives on your laptop** (`vault-keys.json`,
-  `0600`) and is fed in per session — the box never stores the unseal key.
-- The **root token** is needed for `load`/reads, so it's written to owner-only `0600`
-  files on the box (`vault.env`, `~/.bao-token`). It (and the unseal key) are never
-  passed on the command line — they travel via stdin/env, so `ps` / `/proc/<pid>/cmdline`
-  can't leak them.
+  (encrypted on disk); your **unseal key + root token live on your laptop**
+  (`vault-keys.json`, `0600`) and the unseal key is fed in per session — the box never
+  stores the unseal key.
+- The box holds only a **scoped token** (policy `devbox-app`, limited to `secret/*`),
+  not root — written to owner-only `0600` files (`vault.env`, `~/.bao-token`) for
+  `load`/reads. Neither the unseal key nor any token is passed on the command line —
+  they travel via stdin/env, so `ps` / `/proc/<pid>/cmdline` can't leak them.
 - On a DigitalOcean droplet there's no swap, so `disable_mlock=true` doesn't risk
   paging secret memory to disk.
+- **If `vault init` is interrupted** (SSH drops) after it initializes but before the
+  keys reach your laptop, that box's vault is unrecoverable — `vault unseal` will tell
+  you to tear down and re-provision. (No data lost; the durable copy is on your laptop.)
 - Net: the vault is network-isolated (localhost-only) and sealed at rest — your SSH
   login is the gate. The residual is the inherent runtime exposure: any code running as
-  `eddyg` while the vault is *unsealed* can read the token, and a secret in use is
-  plaintext in that process's memory.
+  `eddyg` while the vault is *unsealed* can read the scoped token, and a secret in use
+  is plaintext in that process's memory.
 
 ## What you get (per the spec)
 

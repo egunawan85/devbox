@@ -103,11 +103,12 @@ is a **disposable, session-scoped cache** — its contents die with the box.
   copy. Editing/organizing the store is done in the operator's editor.
 - **E4** Secrets are **never** placed in cloud-init / user-data, shell rc files,
   committed files, or droplet metadata.
-- **E5** The vault uses a **single unseal key (1-of-1)**. The **unseal key lives on the
-  operator's machine** (`vault-keys.json`, `0600`) and is fed in per session to unseal;
-  the box never stores the unseal key. The **root token** (needed for load/reads) is
-  written to **owner-only `0600` files** on the box. Neither the unseal key nor the
-  token is ever passed on the command line — they travel via stdin/env, so `ps` /
+- **E5** The vault uses a **single unseal key (1-of-1)**. The **unseal key + root token
+  live on the operator's machine** (`vault-keys.json`, `0600`); the unseal key is fed in
+  per session and the box **never stores the unseal key**. The box holds only a
+  **least-privilege token** (policy `devbox-app`, scoped to `secret/*`), not root, in
+  **owner-only `0600` files** for load/reads. Neither the unseal key nor any token is
+  ever passed on the command line — they travel via stdin/env, so `ps` /
   `/proc/<pid>/cmdline` can't leak them.
 - **E6** The box's *own* auth (Claude, GitHub) follows the same spirit — interactive
   login + forwarded SSH agent, nothing at rest (see [A], [T]).
