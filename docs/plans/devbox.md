@@ -6,13 +6,17 @@
 
 ## Status
 
-- **Phase:** 0 ✅, 1 ✅, 2 (DigitalOcean) ✅ merged to `main` (RT-hardened). Phase 2c
-  (OpenBao vault) = **design locked, building next**. Azure/Windows = 2b (deferred).
-- **Branch:** `feat/devbox-vault` (off `main`).
-- **Next action:** build Phase 2c — cloud-init installs OpenBao (localhost-bound) +
-  `devbox vault up`/`load` helpers. Settle storage mode (E7) while building.
-- **Blocked on:** nothing to build. Separately, a live `devbox up` is gated on the
-  operator's DO token + go-ahead (real infra, costs money).
+- **Phase:** 0 ✅, 1 ✅, 2 ✅ (DigitalOcean, RT-hardened), 2c ✅ (OpenBao **prod** vault,
+  2× external RT). `devbox up` is now **one command** (provision → configure → vault
+  init/unseal → load all secrets), idempotent. All on `main`. Azure/Windows = 2b (deferred).
+- **Branch:** `main` (all feature branches merged).
+- **Next action:** **live deployment test** — the only thing left. Nothing else to build
+  for the Linux path. Run `devbox up` against real DigitalOcean and shake out
+  reality-only issues (doctl flags, cloud-init timing, OpenBao prod init/unseal,
+  clone-over-forwarded-agent). See the live runbook in `deploy/README.md`.
+- **Blocked on:** nothing to build. The live test is gated on the operator's DO token +
+  spend. Also pending (operator, non-blocking): rename local checkout `claude-configs/`
+  → `devbox/`.
 
 ## Target repo structure
 
@@ -246,3 +250,9 @@ _Append dated entries as work happens (newest last). Today: 2026-06-16._
   `devbox-app` token scoped to `secret/*`, not root; root stays on laptop), L1–L4. Branch
   `feat/devbox-vault` @ a19d02d. Two RT worktrees still on disk (devbox-vault-rt,
   devbox-vault-rt2). Live-pending.
+- **2026-06-16** Made `devbox up` one command (provision → configure → vault
+  init/unseal → load all `~/devbox-secrets/*.env`), idempotent on re-run. Refactor:
+  `vault_start` (server-start, returns seal-status), `vault_bringup` (init/unseal as
+  needed), `vault_load_all`, `vault_host` (reuses up's IP). Vault defaults moved to
+  `load_conf`. Docs cleaned: spec D1, plan Status, README usage. Linux path complete;
+  only the live deployment test remains.

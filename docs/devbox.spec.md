@@ -15,8 +15,9 @@ Each requirement is observable — you can check whether a given box satisfies i
 
 ## D — Deployment & lifecycle
 
-- **D1** `provision` stands up a running box for a chosen OS/provider with **one
-  command**, then configures it.
+- **D1** `up` is **one command, end to end**: it provisions a running box (if absent),
+  configures it, brings the vault to ready (init/unseal — see [E]), and loads the
+  operator's secrets. Idempotent (D3).
 - **D2** `configure` runs **standalone against an existing box** given its host and
   OS (`--host`, `--os linux|windows`) — the config-only path.
 - **D3** Both `provision` and `configure` are **idempotent / convergent**: re-running
