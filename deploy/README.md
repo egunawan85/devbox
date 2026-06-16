@@ -48,6 +48,10 @@ The durable home is your **laptop**: keep one plaintext file per project under
 ~/devbox-secrets/myapp.env     # KEY=value lines, edited in your editor
 ```
 
+Values are taken **literally** — `KEY=value` stores `value`; `KEY="value"` stores the
+quotes too. Don't wrap values in quotes unless you want the quotes included. Lines that
+aren't a valid `NAME=value` (comments, blanks, junk) are ignored.
+
 Per session:
 
 ```sh

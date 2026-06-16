@@ -282,15 +282,15 @@ resolve_host() {
   printf '%s' "$h"
 }
 
-# Convert a KEY=value .env file -> a flat JSON object (handles spaces in values).
-# Runs on the laptop; jq does the escaping.
+# Convert a KEY=value .env file -> a flat JSON object (handles spaces/`=` in values).
+# Runs on the laptop; jq does the escaping. Robust: lines that aren't a valid
+# `NAME=value` (comments, blanks, junk) are skipped, not errored (capture(...)? ).
 env_to_json() {
   command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
   jq -Rn '
-    reduce inputs as $line ({};
-      if ($line | test("^\\s*#")) or ($line | test("^\\s*$")) then .
-      else . + ( $line | capture("^\\s*(?<k>[^=]+?)\\s*=(?<v>.*)$") | {(.k): .v} )
-      end)
+    [ inputs
+      | capture("^\\s*(?<k>[A-Za-z_][A-Za-z0-9_]*)\\s*=(?<v>.*)$")?
+    ] | map({(.k): .v}) | add // {}
   ' "$1"
 }
 
@@ -323,18 +323,21 @@ EOF
 # Push a project's local .env into the box's vault at <mount>/<project>.
 vault_load() {
   local proj=${1:-}; [ -n "$proj" ] || die "usage: $(basename "$0") vault load <project>"
+  case "$proj"        in *[!a-zA-Z0-9._-]*) die "invalid project name: '$proj'";; esac
+  case "$VAULT_MOUNT" in ''|*[!a-zA-Z0-9._-]*) die "invalid VAULT_MOUNT: '$VAULT_MOUNT'";; esac
   local f="$SECRETS_DIR/$proj.env"
   [ -f "$f" ] || die "no secrets file at $f"
   local host json; host=$(resolve_host)
   json=$(env_to_json "$f") || die "failed to parse $f"
   ssh_box "$host" 'true'
   log "loading $f -> vault $VAULT_MOUNT/$proj on $host"
-  printf '%s' "$json" | ssh_box "$host" "VAULT_MOUNT='$VAULT_MOUNT' PROJ='$proj' bash -s" <<'EOF'
-set -eu
-. "$HOME/.config/devbox/vault.env" 2>/dev/null || { echo "vault not up — run 'devbox vault up' first" >&2; exit 1; }
-bao kv put -mount="$VAULT_MOUNT" "$PROJ" -
-EOF
-  log "done. On the box: bao kv get -mount=$VAULT_MOUNT $proj"
+  # The JSON travels on STDIN (in memory — never written to the box's disk). The remote
+  # command is inline (NOT a heredoc), so stdin stays free to carry the data into
+  # `bao kv put -`. proj/mount are validated above, so inlining them is safe.
+  printf '%s' "$json" | ssh_box "$host" \
+    "set -eu; . \"\$HOME/.config/devbox/vault.env\" 2>/dev/null || { echo 'vault not up; run: devbox vault up' >&2; exit 1; }; exec bao kv put -mount='$VAULT_MOUNT' '$proj' -" \
+    >/dev/null
+  log "loaded. On the box: bao kv get -mount=$VAULT_MOUNT $proj"
 }
 
 vault_status() {

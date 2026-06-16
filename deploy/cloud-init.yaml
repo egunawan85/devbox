@@ -59,15 +59,16 @@ runcmd:
   # --- Claude Code CLI ---
   - npm install -g @anthropic-ai/claude-code
   # --- OpenBao (the vault; installed now, started on demand by `devbox vault up`) ---
-  #     Fetches the latest release .deb over TLS. [VERIFY against OpenBao's current
-  #     asset naming on first live run.]
+  #     Fetches the latest release .deb over TLS. Asset name is `openbao_<ver>_linux_<arch>.deb`
+  #     (verified against the GitHub releases API); installs the `bao` binary.
   - |
     set -e
     ver=$(curl -fsSL https://api.github.com/repos/openbao/openbao/releases/latest | jq -r .tag_name | sed 's/^v//')
     arch=$(dpkg --print-architecture)
-    curl -fsSL -o /tmp/openbao.deb "https://github.com/openbao/openbao/releases/download/v${ver}/bao_${ver}_linux_${arch}.deb"
+    curl -fsSL -o /tmp/openbao.deb "https://github.com/openbao/openbao/releases/download/v${ver}/openbao_${ver}_linux_${arch}.deb"
     dpkg -i /tmp/openbao.deb || apt-get install -f -y
     rm -f /tmp/openbao.deb
+    command -v bao >/dev/null || { echo "FATAL: bao binary not found after OpenBao install" >&2; exit 1; }
   # --- Pin GitHub's host keys (fetched over TLS) so the box's git clone needs no
   #     TOFU; self-updates if GitHub rotates keys (M3) ---
   - 'curl -fsSL https://api.github.com/meta | jq -r ".ssh_keys[] | \"github.com \" + ." >> /etc/ssh/ssh_known_hosts'
