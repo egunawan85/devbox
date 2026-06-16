@@ -74,9 +74,15 @@ time.
 **Honest notes:**
 - OpenBao runs in **dev mode** (in-memory, auto-unsealed) — appropriate for a
   disposable, SSH-gated, session-scoped cache; *not* a hardened production Vault.
-- The vault **token** is written to `~/.bao-token` (`0600`) on the box so `bao` and
-  your apps can talk to it. That token is a dead credential after reboot (the
-  in-memory vault is gone); the **secret values themselves are never written to disk**.
+- **Secret values** live in RAM only and are never written to the box's disk.
+- The vault's **root token**, however, *is* on disk — in owner-only `0600` files
+  (`~/.config/devbox/vault.env`, `~/.bao-token`) and in the dev-mode log
+  (`~/.config/devbox/openbao.log`, also `0600`) so `bao`/your apps can talk to the
+  vault. It's a **dead credential after reboot** (the in-memory vault is gone). It is
+  *not* passed on the command line, so `ps` / `/proc/<pid>/cmdline` can't leak it.
+- Net: the vault is reachable only from inside an SSH session (network-isolated +
+  owner-only token), so your SSH login is the gate — but any code already running as
+  `eddyg` can read the token and thus the secrets (the inherent runtime exposure).
 - Same runtime caveat as always: while an app is *using* a secret, it's plaintext in
   that process's memory.
 

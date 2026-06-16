@@ -289,7 +289,7 @@ env_to_json() {
   command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
   jq -Rn '
     [ inputs
-      | capture("^\\s*(?<k>[A-Za-z_][A-Za-z0-9_]*)\\s*=(?<v>.*)$")?
+      | capture("^\\s*(?:export\\s+)?(?<k>[A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(?<v>.*?)\\r?$")?
     ] | map({(.k): .v}) | add // {}
   ' "$1"
 }
@@ -302,18 +302,24 @@ vault_up() {
   log "starting in-memory OpenBao (localhost-only) on $host"
   ssh_box "$host" 'bash -s' <<'EOF'
 set -eu
+umask 077   # FIRST: everything we create below (incl. the dev-mode log that echoes
+            # the root token) is owner-only 0600/700 — not world-readable (H-1).
 command -v bao >/dev/null 2>&1 || { echo "bao (OpenBao) not installed on the box" >&2; exit 1; }
+mkdir -p "$HOME/.config/devbox"
+exec 9>"$HOME/.config/devbox/vault.lock"; flock 9   # serialize concurrent 'vault up' (L-1)
 addr="http://127.0.0.1:8200"
 if curl -fsS "$addr/v1/sys/health" >/dev/null 2>&1; then echo "OpenBao already running"; exit 0; fi
-mkdir -p "$HOME/.config/devbox"
+log="$HOME/.config/devbox/openbao.log"
 tok=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)
-nohup bao server -dev -dev-listen-address=127.0.0.1:8200 -dev-root-token-id="$tok" \
-  >"$HOME/.config/devbox/openbao.log" 2>&1 & disown || true
+# Token via ENVIRONMENT, not argv: /proc/<pid>/environ is owner-only, so 'ps' /
+# /proc/<pid>/cmdline can't leak the root token to other local users (H-2).
+BAO_DEV_ROOT_TOKEN_ID="$tok" \
+  nohup bao server -dev -dev-listen-address=127.0.0.1:8200 >"$log" 2>&1 & disown || true
 for i in $(seq 1 20); do curl -fsS "$addr/v1/sys/health" >/dev/null 2>&1 && break; sleep 0.5; done
-curl -fsS "$addr/v1/sys/health" >/dev/null 2>&1 || { echo "OpenBao failed to start; see ~/.config/devbox/openbao.log" >&2; exit 1; }
-# Token to a localhost, in-memory vault — dead after reboot; the SECRET VALUES stay
-# in RAM only. Stored 0600 so the bao CLI (and apps) in this box can use it.
-umask 077
+curl -fsS "$addr/v1/sys/health" >/dev/null 2>&1 || { echo "OpenBao failed to start; see $log" >&2; exit 1; }
+# The SECRET VALUES live in RAM only (dev mode). The root TOKEN is written to these
+# owner-only files (and is in $log) so the bao CLI/apps can use it; it's a dead
+# credential once the in-memory vault is gone (reboot/teardown).
 printf 'export BAO_ADDR=%s\nexport BAO_TOKEN=%s\n' "$addr" "$tok" >"$HOME/.config/devbox/vault.env"
 printf '%s' "$tok" >"$HOME/.bao-token"
 echo "OpenBao up (in-memory). Apps: 'source ~/.config/devbox/vault.env' then 'bao kv get ...'."
@@ -323,8 +329,8 @@ EOF
 # Push a project's local .env into the box's vault at <mount>/<project>.
 vault_load() {
   local proj=${1:-}; [ -n "$proj" ] || die "usage: $(basename "$0") vault load <project>"
-  case "$proj"        in *[!a-zA-Z0-9._-]*) die "invalid project name: '$proj'";; esac
-  case "$VAULT_MOUNT" in ''|*[!a-zA-Z0-9._-]*) die "invalid VAULT_MOUNT: '$VAULT_MOUNT'";; esac
+  case "$proj"        in ''|-*|*[!a-zA-Z0-9._-]*) die "invalid project name: '$proj'";; esac
+  case "$VAULT_MOUNT" in ''|-*|*[!a-zA-Z0-9._-]*) die "invalid VAULT_MOUNT: '$VAULT_MOUNT'";; esac
   local f="$SECRETS_DIR/$proj.env"
   [ -f "$f" ] || die "no secrets file at $f"
   local host json; host=$(resolve_host)

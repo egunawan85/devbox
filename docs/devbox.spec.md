@@ -103,9 +103,10 @@ is a **disposable, session-scoped cache** — its contents die with the box.
 - **E4** Secrets are **never** placed in cloud-init / user-data, shell rc files,
   committed files, or droplet metadata.
 - **E5** The operator's **SSH key gates vault access only via the SSH boundary** (no
-  vault credential is forwarded). OpenBao's own internals (unseal key, token) are
-  generated **per box**, held **in memory while unsealed**, and discarded with the box;
-  they are not the SSH key and are not a long-lived secret the operator carries.
+  vault credential is forwarded). OpenBao's root token is generated **per box**, passed
+  via the environment (never argv, so `ps` can't leak it), and written only to
+  **owner-only `0600` files** on the box; it is a **dead credential after reboot** and
+  is not a long-lived secret the operator carries. Secret **values** stay in RAM only.
 - **E6** The box's *own* auth (Claude, GitHub) follows the same spirit — interactive
   login + forwarded SSH agent, nothing at rest (see [A], [T]).
 - **E7** _Build-time sub-decision (see plan):_ OpenBao on-box storage is either

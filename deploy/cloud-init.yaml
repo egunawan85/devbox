@@ -59,15 +59,20 @@ runcmd:
   # --- Claude Code CLI ---
   - npm install -g @anthropic-ai/claude-code
   # --- OpenBao (the vault; installed now, started on demand by `devbox vault up`) ---
-  #     Fetches the latest release .deb over TLS. Asset name is `openbao_<ver>_linux_<arch>.deb`
-  #     (verified against the GitHub releases API); installs the `bao` binary.
+  #     PINNED version + SHA256 verification against the release's published checksums
+  #     (M-3). Asset `openbao_<ver>_linux_<arch>.deb` installs the `bao` binary.
+  #     Bump OPENBAO_VER to update; check https://github.com/openbao/openbao/releases.
   - |
     set -e
-    ver=$(curl -fsSL https://api.github.com/repos/openbao/openbao/releases/latest | jq -r .tag_name | sed 's/^v//')
+    OPENBAO_VER=2.5.4
     arch=$(dpkg --print-architecture)
-    curl -fsSL -o /tmp/openbao.deb "https://github.com/openbao/openbao/releases/download/v${ver}/openbao_${ver}_linux_${arch}.deb"
-    dpkg -i /tmp/openbao.deb || apt-get install -f -y
-    rm -f /tmp/openbao.deb
+    deb="openbao_${OPENBAO_VER}_linux_${arch}.deb"
+    base="https://github.com/openbao/openbao/releases/download/v${OPENBAO_VER}"
+    curl -fsSL -o "/tmp/${deb}" "${base}/${deb}"
+    curl -fsSL -o /tmp/openbao-checksums.txt "${base}/checksums-linux.txt"
+    ( cd /tmp && grep "  ${deb}\$" openbao-checksums.txt | sha256sum -c - )
+    dpkg -i "/tmp/${deb}" || apt-get install -f -y
+    rm -f "/tmp/${deb}" /tmp/openbao-checksums.txt
     command -v bao >/dev/null || { echo "FATAL: bao binary not found after OpenBao install" >&2; exit 1; }
   # --- Pin GitHub's host keys (fetched over TLS) so the box's git clone needs no
   #     TOFU; self-updates if GitHub rotates keys (M3) ---
@@ -86,4 +91,5 @@ runcmd:
       sleep 1
     done
     ss -ltn | grep -q ":__SSH_PORT__ " || { echo "FATAL: sshd not listening on __SSH_PORT__" >&2; exit 1; }
+    command -v bao >/dev/null || { echo "FATAL: OpenBao (bao) missing — provisioning incomplete" >&2; exit 1; }
     touch /var/lib/cloud/devbox-ready
