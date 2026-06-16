@@ -6,12 +6,13 @@
 
 ## Status
 
-- **Phase:** 0 ✅, 1 ✅, 2 (DigitalOcean) 🔨 built + statically verified; **live apply
-  pending** (gated on operator token + go-ahead). Azure/Windows = Phase 2b (deferred).
-- **Branch:** `feat/devbox-deploy` (off `main`).
-- **Next action:** operator runs `doctl auth init`, fills `deploy/devbox.conf`, then
-  we do a gated `devbox up` (real infra, costs money) and verify end-to-end (Phase 3).
-- **Blocked on:** nothing to build; live apply needs the DO token + explicit approval.
+- **Phase:** 0 ✅, 1 ✅, 2 (DigitalOcean) ✅ merged to `main` (RT-hardened). Phase 2c
+  (OpenBao vault) = **design locked, building next**. Azure/Windows = 2b (deferred).
+- **Branch:** `feat/devbox-vault` (off `main`).
+- **Next action:** build Phase 2c — cloud-init installs OpenBao (localhost-bound) +
+  `devbox vault up`/`load` helpers. Settle storage mode (E7) while building.
+- **Blocked on:** nothing to build. Separately, a live `devbox up` is gated on the
+  operator's DO token + go-ahead (real infra, costs money).
 
 ## Target repo structure
 
@@ -111,16 +112,22 @@ instructions. If we want devbox-repo-specific agent guidance, add a separate roo
 - [ ] **Live apply (gated):** needs operator's DO token (`doctl auth init`) + the two
       real pubkeys + explicit go-ahead. Costs money / creates real infra.
 
-### Phase 2c — env/secrets (`devbox env`) — POST-RT, design captured (spec §E)
-- [ ] `devbox env push [subpath]` / `pull [subpath]`: rsync the local sparse-shadow
-      store (`~/devbox-secrets/`, mirrors `proj/`) to/from the box; `pull` filters to
-      `.env*`. Editing/organizing stays in the operator's editor.
-- [ ] Deliver into **tmpfs** on the box (RAM-only, gone on reboot), not the project
-      dir on disk (E1).
-- [ ] Add `AcceptEnv DEVBOX_*` to the SSH hardening + document a `SendEnv` snippet
-      (optional env injection path).
-- [ ] Vault: deferred — when adopted, lean SOPS+age; unlock credential stays on the
-      operator machine (forwarded), never at rest on the box (E5).
+### Phase 2c — OpenBao vault on the box (`devbox vault`) — design captured (spec §E)
+_Supersedes the earlier tmpfs/sparse-shadow `devbox env` idea (reverted, never shipped)._
+- [ ] cloud-init installs **OpenBao**, configured to listen on **`127.0.0.1` only**
+      (network-unreachable; SSH login is the access gate — E1).
+- [ ] `devbox vault up`: thin helper — init + unseal OpenBao on the box; keep the
+      unseal key/token **in the SSH session / memory**, not on disk (E5). Decide the
+      storage mode (E7): in-memory vs sealed-on-disk.
+- [ ] `devbox vault load [path]`: read the operator's plaintext structured store
+      (`~/devbox-secrets/`) and write the values into the box's vault **over SSH** (E2,
+      E3). Operator edits the store in their editor.
+- [ ] App-read path: document/helper for an app on the box to read its secrets from
+      the localhost vault (e.g. `bao kv get …` or an env-injection wrapper at launch).
+- [ ] Verify (V4): load a secret → read it back only from inside an SSH session →
+      confirm the vault is unreachable from the network → nothing usable after teardown.
+- [ ] Open sub-decisions to settle while building: storage mode (E7), where the
+      durable store lives on the laptop, the vault path layout, app-read ergonomics.
 
 ### Phase 2b — Azure / Windows (deferred)
 - [ ] Windows VM provisioning (`az` CLI or Terraform), NSG inbound 2222 only, no RDP.
@@ -206,3 +213,13 @@ _Append dated entries as work happens (newest last). Today: 2026-06-16._
   wrapper fallback for `sh -c`/`eval`/`xargs git` (M4). Re-verified statically (bash
   -n, guard 19/19, render→valid YAML, L1 rejects bad input). RT worktree
   `/Users/eddyg/Dev/proj/devbox-rt` can be removed. Still gated: live `up`.
+- **2026-06-16** Merged Phase 2 to `main` and pushed (`eb0f1de`); internal RT on the
+  hardening diff clean (guard 33/33). Removed RT worktree + branches.
+- **2026-06-16** Secrets design **redone** after I prematurely started building the
+  tmpfs/rsync `devbox env` (reverted, never committed; was also wrongly on `main`).
+  Long plain-English alignment → final model: **OpenBao vault on the devbox**, bound to
+  `127.0.0.1`, gated by the SSH login (OpenBao has no SSH-key auth, so localhost-behind-
+  SSH is the gate). App secrets live **plaintext, structured, on the operator's laptop**
+  (durable home) and are pushed in per session via `devbox vault load`; the vault dies
+  with the box. The SSH key authenticates *access*, not encryption. Rewrote spec §E
+  (E1–E7), V4, overview, and Phase 2c on branch `feat/devbox-vault`. Building next.

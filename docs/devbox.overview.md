@@ -57,11 +57,12 @@ Two components, one feature:
 - **No private keys on the box.** Access is via my existing device SSH keys (laptop
   + desktop). The devbox reuses those same keys for outbound work via **SSH agent
   forwarding** — it never stores a key of its own.
-- **Secrets stay off the box; it's a conduit, not a store.** The box's own auth is
-  interactive + forwarded agent. Project `.env` secrets live on my machine(s) (or a
-  vault) and are pushed into **tmpfs (RAM)** per session — never persisted, gone on
-  teardown. The only irreducible exposure is *runtime* (a secret in use is plaintext
-  in memory), which storage choices can't fix. See [spec §E](./devbox.spec.md).
+- **Secrets: an OpenBao vault on the box, gated by SSH.** The box runs an OpenBao
+  vault bound to localhost — reachable only from inside an SSH session, so my SSH login
+  *is* the access gate. App secrets live plaintext on my laptop (durable home) and are
+  pushed into the box's vault per session; the vault dies with the box. The box's own
+  auth stays interactive + forwarded agent. The only irreducible exposure is *runtime*
+  (a secret in use is plaintext in memory). See [spec §E](./devbox.spec.md).
 - **Minimal inbound, open outbound.** The only inbound is SSH on a non-default port
   (key-only, no IP allowlist); everything else is denied. The box can freely reach
   out (git remotes, other devboxes it's been granted, package registries).

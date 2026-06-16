@@ -83,27 +83,34 @@ Each requirement is observable — you can check whether a given box satisfies i
 
 ## E — Environment & secrets
 
-The box is a **conduit / dev environment, not a secret store.** No project or app
-secret has a permanent home on the box.
+App secrets are served on the box by an **OpenBao vault**, gated by the SSH login, and
+loaded each session from a durable plaintext home on the operator's machine. The vault
+is a **disposable, session-scoped cache** — its contents die with the box.
 
-- **E1** No project/app secret is stored **in plaintext at rest on the box**.
-  `.env`-style secrets are delivered per session into **tmpfs (RAM)**, never the
-  persistent disk, and do not survive reboot/teardown.
-- **E2** The **home-of-record** for secrets lives **off the box** — on the operator's
-  machine(s) and/or a vault. Secrets are never born-and-died on the box.
-- **E3** Project secrets are organized as a **sparse shadow of the box's projects
-  root** (`/home/eddyg/proj`): the operator keeps secret files at the *same relative
-  path* under a local store (default `~/devbox-secrets/`, visible, perms `700`/`600`).
-  `devbox env push [subpath]` overlays them onto the matching project dir (no delete);
-  `devbox env pull [subpath]` retrieves `.env*` files back. Creating/organizing files
-  is done in the operator's editor — the CLI only moves bytes.
+- **E1** App secrets are served by an **OpenBao vault running on the devbox, bound to
+  `127.0.0.1` only** — unreachable from the network. The **SSH login is the access
+  gate**: only a session authenticated by the operator's SSH key can reach the vault.
+  (OpenBao has no SSH-key auth method of its own; localhost-binding behind SSH is how
+  the SSH key gates access.)
+- **E2** The **durable home-of-record** for app secrets is the **operator's machine**,
+  stored **plaintext** in a structured layout (default `~/devbox-secrets/`, perms
+  `700`/`600`). The box's vault is a session-scoped cache loaded from there — secrets
+  are never born on the box and do not survive its teardown.
+- **E3** Secrets reach the box via **`devbox vault load [path]`**, which pushes the
+  plaintext values from the operator's store into the box's OpenBao **over the
+  authenticated SSH session**. The box never pulls secrets itself and keeps no durable
+  copy. Editing/organizing the store is done in the operator's editor.
 - **E4** Secrets are **never** placed in cloud-init / user-data, shell rc files,
   committed files, or droplet metadata.
-- **E5** If a vault is used, the **unlock credential stays on the operator's machine**
-  (forwarded SSH-agent signature, or resolve-locally-and-project the values). The box
-  **never holds a long-lived vault credential at rest**.
-- **E6** The box's *own* auth (Claude, GitHub) follows the same rule — interactive
+- **E5** The operator's **SSH key gates vault access only via the SSH boundary** (no
+  vault credential is forwarded). OpenBao's own internals (unseal key, token) are
+  generated **per box**, held **in memory while unsealed**, and discarded with the box;
+  they are not the SSH key and are not a long-lived secret the operator carries.
+- **E6** The box's *own* auth (Claude, GitHub) follows the same spirit — interactive
   login + forwarded SSH agent, nothing at rest (see [A], [T]).
+- **E7** _Build-time sub-decision (see plan):_ OpenBao on-box storage is either
+  **in-memory** (nothing on disk, wiped on reboot) or **sealed/encrypted on disk**
+  (unsealed into memory per session). Either keeps secrets unusable at rest.
 
 **Runtime exposure (inherent, not removable).** To *use* a secret, its plaintext must
 sit in process memory, where co-resident code on the box (e.g. a malicious dependency)
@@ -122,9 +129,10 @@ production secrets.
   using a forwarded key — no key stored on the box).
 - **V3** The deploy command **reports what it did** (provider, OS, host/IP, access
   mode, what was installed, how to connect) — it does not silently succeed.
-- **V4** `devbox env push`/`pull` round-trips a `.env` to the correct mirrored path
-  under `proj/`, lands it in tmpfs (not persistent disk), and leaves no plaintext at
-  rest after teardown (E1, E3).
+- **V4** `devbox vault load` pushes a secret from the operator's store into the box's
+  OpenBao; an app on the box can read it back **only from within an SSH session**
+  (vault is unreachable from the network); and after teardown nothing usable remains
+  (E1–E3).
 
 ## Resolved decisions (2026-06-16)
 
@@ -135,9 +143,8 @@ production secrets.
   file** — DigitalOcean is the source of truth; so the "state location" question is
   moot.
 - **Network access:** SSH on `2222`, key-only, no IP allowlist, no Tailscale.
-- **Secrets model:** box is a conduit, not a store (see [E]). Project `.env` secrets
-  mirror `proj/`, pushed into tmpfs per session; home-of-record stays off the box.
-- **Vault: deferred.** Start with plaintext `.env` files in a synced location;
-  graduate to a vault when it bites. Leaning **SOPS + age** (encrypted files, no
-  infra, syncs both Macs); 1Password/Doppler/Infisical as managed alternatives.
-  HashiCorp Vault judged overkill for a solo personal box.
+- **Secrets model:** **OpenBao vault on the devbox**, bound to localhost and gated by
+  the SSH login (see [E]). Durable home = plaintext structured store on the operator's
+  machine; `devbox vault load` pushes secrets in per session; the vault dies with the
+  box. (Superseded the earlier tmpfs/sparse-shadow and SOPS-resolve-on-laptop ideas:
+  the operator wants a real vault on the box, unlocked via the SSH boundary.)
