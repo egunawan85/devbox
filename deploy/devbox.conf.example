@@ -1,0 +1,26 @@
+# devbox deploy config — copy to devbox.conf (gitignored) and edit.
+#   cp deploy/devbox.conf.example deploy/devbox.conf
+#
+# The DigitalOcean API token is NOT stored here. Provide it via doctl
+# (`doctl auth init`) or the DIGITALOCEAN_ACCESS_TOKEN environment variable.
+
+# --- Droplet ---
+DROPLET_NAME=devbox
+REGION=sgp1
+SIZE=s-2vcpu-4gb
+IMAGE=ubuntu-24-04-x64
+TAG=devbox
+FIREWALL_NAME=devbox-fw
+
+# --- Access ---
+DEVBOX_USER=eddyg
+SSH_PORT=2222
+# Public keys allowed to log in (laptop + desktop). Space- or newline-separated
+# paths. These authorize login AND are the keys you forward for outbound git.
+SSH_PUBKEY_FILES="$HOME/.ssh/id_ed25519.pub"
+
+# --- Config source (cloned on the box during `configure`, via your forwarded key) ---
+REPO_URL=git@github.com:egunawan85/devbox.git
+REPO_BRANCH=main
+# Where the repo is checked out on the box (install.sh runs from here).
+REPO_DIR=/home/eddyg/devbox

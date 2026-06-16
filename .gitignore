@@ -1,0 +1,10 @@
+# Operator-local deploy config (contains your key paths / choices, not secrets,
+# but machine-specific) — never commit.
+deploy/devbox.conf
+
+# Local Claude session overrides.
+.claude/settings.local.json
+
+# Misc
+*.log
+.DS_Store

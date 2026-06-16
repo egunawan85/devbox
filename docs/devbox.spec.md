@@ -88,10 +88,12 @@ Each requirement is observable — you can check whether a given box satisfies i
 - **V3** The deploy command **reports what it did** (provider, OS, host/IP, access
   mode, what was installed, how to connect) — it does not silently succeed.
 
-## Open questions
+## Resolved decisions (2026-06-16)
 
-- **T4 auth**: bake a Claude API key in via env, or interactive login on first use?
-- **T2 gh auth**: rely on forwarded SSH for git, and `gh` via a token in env — or
-  interactive `gh auth login` on first use?
-- **P3 defaults**: pin sizes/regions, or prompt each deploy?
-- Terraform **state** location: local (gitignored) vs. a remote backend?
+- **Auth (T4, T2):** interactive, **no secrets at rest** — git via the forwarded
+  agent; `claude` and `gh auth login` interactively on first session.
+- **P3 defaults:** pinned — `sgp1`, `s-2vcpu-4gb`, Ubuntu 24.04; SSH port `2222`.
+- **Provisioning tool:** `doctl` + `cloud-init` + bash (not Terraform). **No state
+  file** — DigitalOcean is the source of truth; so the "state location" question is
+  moot.
+- **Network access:** SSH on `2222`, key-only, no IP allowlist, no Tailscale.

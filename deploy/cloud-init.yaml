@@ -1,0 +1,66 @@
+#cloud-config
+# devbox first-boot setup (DigitalOcean / Ubuntu 24.04).
+#
+# This file is a TEMPLATE rendered by the `devbox` CLI, which fills in the login
+# user, the SSH port, and the list of authorized public keys before upload.
+# It sets up the box and user, hardens SSH, and installs the toolchain.
+#
+# It deliberately does NOT clone the repo or store any secret — the repo clone and
+# config install happen later in `devbox configure`, over an agent-forwarded SSH
+# session (so a private repo uses the operator's forwarded key, not a key at rest).
+
+users:
+  - name: __DEVBOX_USER__
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    ssh_authorized_keys:
+__AUTHORIZED_KEYS_BLOCK__
+
+package_update: true
+package_upgrade: true
+packages:
+  - git
+  - curl
+  - ca-certificates
+  - jq
+  - build-essential
+
+write_files:
+  # SSH hardening drop-in (sshd reads this in addition to the main config).
+  - path: /etc/ssh/sshd_config.d/10-devbox.conf
+    permissions: '0644'
+    content: |
+      Port __SSH_PORT__
+      PasswordAuthentication no
+      PermitRootLogin no
+      PubkeyAuthentication yes
+      AllowAgentForwarding yes
+      X11Forwarding no
+  # Ubuntu 24.04 ships SSH as a socket-activated service; the socket's
+  # ListenStream overrides sshd_config's Port. Point the socket at our port too.
+  - path: /etc/systemd/system/ssh.socket.d/10-devbox-port.conf
+    permissions: '0644'
+    content: |
+      [Socket]
+      ListenStream=
+      ListenStream=__SSH_PORT__
+
+runcmd:
+  # --- GitHub CLI (gh) apt repo ---
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  - chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  - 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list'
+  # --- Node.js LTS (NodeSource) ---
+  - curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+  - apt-get update
+  - apt-get install -y gh nodejs
+  # --- Claude Code CLI ---
+  - npm install -g @anthropic-ai/claude-code
+  # --- Apply SSH port change (reload socket + restart service) ---
+  - systemctl daemon-reload
+  - systemctl restart ssh.socket || true
+  - systemctl restart ssh
+  # --- Signal completion marker for the operator's wait loop ---
+  - touch /var/lib/cloud/devbox-ready
