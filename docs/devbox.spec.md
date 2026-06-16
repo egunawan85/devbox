@@ -78,6 +78,38 @@ Each requirement is observable — you can check whether a given box satisfies i
   Node.js LTS. Extend as needed._
 - **T4** The Claude Code CLI can authenticate. _Mechanism open — see questions._
 
+## E — Environment & secrets
+
+The box is a **conduit / dev environment, not a secret store.** No project or app
+secret has a permanent home on the box.
+
+- **E1** No project/app secret is stored **in plaintext at rest on the box**.
+  `.env`-style secrets are delivered per session into **tmpfs (RAM)**, never the
+  persistent disk, and do not survive reboot/teardown.
+- **E2** The **home-of-record** for secrets lives **off the box** — on the operator's
+  machine(s) and/or a vault. Secrets are never born-and-died on the box.
+- **E3** Project secrets are organized as a **sparse shadow of the box's projects
+  root** (`/home/eddyg/proj`): the operator keeps secret files at the *same relative
+  path* under a local store (default `~/devbox-secrets/`, visible, perms `700`/`600`).
+  `devbox env push [subpath]` overlays them onto the matching project dir (no delete);
+  `devbox env pull [subpath]` retrieves `.env*` files back. Creating/organizing files
+  is done in the operator's editor — the CLI only moves bytes.
+- **E4** Secrets are **never** placed in cloud-init / user-data, shell rc files,
+  committed files, or droplet metadata.
+- **E5** If a vault is used, the **unlock credential stays on the operator's machine**
+  (forwarded SSH-agent signature, or resolve-locally-and-project the values). The box
+  **never holds a long-lived vault credential at rest**.
+- **E6** The box's *own* auth (Claude, GitHub) follows the same rule — interactive
+  login + forwarded SSH agent, nothing at rest (see [A], [T]).
+
+**Runtime exposure (inherent, not removable).** To *use* a secret, its plaintext must
+sit in process memory, where co-resident code on the box (e.g. a malicious dependency)
+can read it and exfiltrate via open outbound. No storage choice fixes this. Mitigate
+by: least-privilege scoping, short-lived/rotating credentials, separating **dev**
+secrets (things run on the box) from **prod** secrets, and — best — letting the
+deployment **target** pull its own secrets so the devbox is never a conduit for
+production secrets.
+
 ## V — Verification (definition of done)
 
 - **V1** A documented post-deploy check confirms the box is live and the harness
@@ -87,6 +119,9 @@ Each requirement is observable — you can check whether a given box satisfies i
   using a forwarded key — no key stored on the box).
 - **V3** The deploy command **reports what it did** (provider, OS, host/IP, access
   mode, what was installed, how to connect) — it does not silently succeed.
+- **V4** `devbox env push`/`pull` round-trips a `.env` to the correct mirrored path
+  under `proj/`, lands it in tmpfs (not persistent disk), and leaves no plaintext at
+  rest after teardown (E1, E3).
 
 ## Resolved decisions (2026-06-16)
 
@@ -97,3 +132,9 @@ Each requirement is observable — you can check whether a given box satisfies i
   file** — DigitalOcean is the source of truth; so the "state location" question is
   moot.
 - **Network access:** SSH on `2222`, key-only, no IP allowlist, no Tailscale.
+- **Secrets model:** box is a conduit, not a store (see [E]). Project `.env` secrets
+  mirror `proj/`, pushed into tmpfs per session; home-of-record stays off the box.
+- **Vault: deferred.** Start with plaintext `.env` files in a synced location;
+  graduate to a vault when it bites. Leaning **SOPS + age** (encrypted files, no
+  infra, syncs both Macs); 1Password/Doppler/Infisical as managed alternatives.
+  HashiCorp Vault judged overkill for a solo personal box.

@@ -104,6 +104,17 @@ instructions. If we want devbox-repo-specific agent guidance, add a separate roo
 - [ ] **Live apply (gated):** needs operator's DO token (`doctl auth init`) + the two
       real pubkeys + explicit go-ahead. Costs money / creates real infra.
 
+### Phase 2c — env/secrets (`devbox env`) — POST-RT, design captured (spec §E)
+- [ ] `devbox env push [subpath]` / `pull [subpath]`: rsync the local sparse-shadow
+      store (`~/devbox-secrets/`, mirrors `proj/`) to/from the box; `pull` filters to
+      `.env*`. Editing/organizing stays in the operator's editor.
+- [ ] Deliver into **tmpfs** on the box (RAM-only, gone on reboot), not the project
+      dir on disk (E1).
+- [ ] Add `AcceptEnv DEVBOX_*` to the SSH hardening + document a `SendEnv` snippet
+      (optional env injection path).
+- [ ] Vault: deferred — when adopted, lean SOPS+age; unlock credential stays on the
+      operator machine (forwarded), never at rest on the box (E5).
+
 ### Phase 2b — Azure / Windows (deferred)
 - [ ] Windows VM provisioning (`az` CLI or Terraform), NSG inbound 2222 only, no RDP.
 - [ ] `install.ps1` (Windows): mirror `install.sh`; verify on the Azure box.
@@ -169,4 +180,13 @@ _Append dated entries as work happens (newest last). Today: 2026-06-16._
   getline-from-file) and the marker string also matching the header comment (now
   whole-line match). Added `GIT_SSH_COMMAND=accept-new` so the box's clone over the
   forwarded agent doesn't choke on GitHub's host key. Static checks pass; **live apply
-  not run** (no DO token here, and it's gated infra).
+  not run** (no DO token here, and it's gated infra). Opened a review worktree at
+  `/Users/eddyg/Dev/proj/devbox-rt` (branch `rt/devbox-deploy` @ `bde789c`) for an
+  external red-team; awaiting findings.
+- **2026-06-16** Design session: env/secrets management. Captured as spec §E. Decisions:
+  box is a conduit not a store; `.env` secrets = sparse shadow of `proj/`
+  (`~/devbox-secrets/`), `devbox env push|pull` only (edits in the editor); deliver into
+  **tmpfs** (no plaintext at rest); runtime exposure is inherent (mitigate by scoping /
+  short-lived creds / dev-vs-prod split / target-pulls-own-secrets). Vault deferred
+  (lean SOPS+age; HashiCorp Vault overkill). Queued as Phase 2c (post-RT). Discussed
+  SSH-agent-forwarding mechanics (challenge-response signing) for vault unlock.
