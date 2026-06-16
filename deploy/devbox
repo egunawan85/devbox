@@ -360,8 +360,8 @@ vault_init() {
 set -eu
 umask 077
 export BAO_ADDR="http://127.0.0.1:8200"
-[ "$(curl -fsS "$BAO_ADDR/v1/sys/seal-status" | jq -r '.initialized')" = "false" ] \
-  || { echo "ALREADY_INITIALIZED" >&2; exit 3; }
+st=$(curl -fsS "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null) || { echo "SERVER_NOT_UP" >&2; exit 4; }
+[ "$(printf '%s' "$st" | jq -r '.initialized')" = "false" ] || { echo "ALREADY_INITIALIZED" >&2; exit 3; }
 # Init output (unseal key + root token) stays in box memory; never on argv.
 out=$(bao operator init -key-shares=1 -key-threshold=1 -format=json)
 unseal=$(printf '%s' "$out" | jq -r '.unseal_keys_b64[0]')
@@ -373,7 +373,7 @@ printf '%s' "$roottok" > "$HOME/.bao-token"
 BAO_TOKEN="$roottok" bao secrets enable -path=secret kv-v2 >/dev/null 2>&1 || true
 printf '%s' "$out"                                                # emit JSON for the laptop
 EOF
-) || die "vault init failed (already initialized? then run: $(basename "$0") vault unseal)"
+) || die "vault init failed — is the server up ('$(basename "$0") vault up') and not already initialized ('$(basename "$0") vault unseal')?"
   [ -n "$out" ] || die "vault init produced no keys"
   umask 077; mkdir -p "$(dirname "$VAULT_KEYS_FILE")"
   printf '%s' "$out" > "$VAULT_KEYS_FILE"

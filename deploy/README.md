@@ -70,8 +70,9 @@ Then, on the box, an app reads them:
 ```sh
 source ~/.config/devbox/vault.env          # sets BAO_ADDR + BAO_TOKEN for this box
 bao kv get -mount=secret myapp             # view
-# inject into a process at launch:
-export $(bao kv get -mount=secret -format=json myapp | jq -r '.data.data|to_entries[]|"\(.key)=\(.value)"')
+# inject into the environment (jq's @sh shell-quotes values, so spaces/specials are safe):
+set -a; eval "$(bao kv get -mount=secret -format=json myapp \
+  | jq -r '.data.data | to_entries[] | "\(.key)=\(.value|@sh)"')"; set +a
 ```
 
 Tear the box down → its vault storage and keys are gone → on the next box, `vault up` +
