@@ -72,8 +72,11 @@ deploy/devbox vault unseal      # re-unseal after a reboot, from your saved key
 deploy/devbox vault load myapp  # (re)push just one project to secret/myapp
 ```
 
-If the box reboots, the vault re-seals — `deploy/devbox vault unseal` reopens it from
-your saved key (no re-init).
+If the box reboots, OpenBao **auto-starts (sealed)** via its systemd unit
+(`devbox-vault.service`), so the server is back up and `deploy/devbox vault unseal`
+reopens it from your saved key (no re-init). If for some reason the server isn't running,
+`deploy/devbox vault up` starts it and unseals in one step. (Server logs:
+`~/.config/devbox/openbao.log` or `journalctl -u devbox-vault`.)
 
 Then, on the box, an app reads them:
 

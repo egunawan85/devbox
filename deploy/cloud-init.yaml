@@ -58,7 +58,8 @@ runcmd:
   - apt-get install -y gh nodejs
   # --- Claude Code CLI ---
   - npm install -g @anthropic-ai/claude-code
-  # --- OpenBao (the vault; installed now, started on demand by `devbox vault up`) ---
+  # --- OpenBao (the vault; installed now. `devbox vault up` installs a systemd unit
+  #     (devbox-vault.service) that runs it and auto-starts it sealed on every boot) ---
   #     PINNED version + SHA256 verification against the release's published checksums
   #     (M-3). Asset `openbao_<ver>_linux_<arch>.deb` installs the `bao` binary.
   #     Bump OPENBAO_VER to update; check https://github.com/openbao/openbao/releases.
