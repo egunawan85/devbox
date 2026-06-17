@@ -25,8 +25,9 @@ Or just push the config to a box that already exists.
 
 ## Deploy
 
-> 🚧 Not built yet — see [the build plan](docs/plans/devbox.md). The intended end
-> state: one command provisions a `devbox` (Linux/DigitalOcean or Windows/Azure),
-> installs this config for user `eddyg`, locks the box to no-public-inbound, and wires
-> SSH agent forwarding — plus a config-only path for boxes that already exist. See
-> [the spec](docs/devbox.spec.md) for the full contract.
+The **Linux/DigitalOcean** path is built: `deploy/devbox up` provisions a box,
+installs this config for user `eddyg`, locks it to no-public-inbound, wires SSH agent
+forwarding, and brings up the OpenBao vault — plus a config-only path (`configure
+--host …`) for boxes that already exist. See [`deploy/README.md`](deploy/README.md)
+for the runbook and [the spec](docs/devbox.spec.md) for the full contract. The
+**Windows/Azure** path is not built yet — see [the build plan](docs/plans/devbox.md).

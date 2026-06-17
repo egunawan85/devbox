@@ -10,13 +10,14 @@
   2× external RT). `devbox up` is now **one command** (provision → configure → vault
   init/unseal → load all secrets), idempotent. All on `main`. Azure/Windows = 2b (deferred).
 - **Branch:** `main` (all feature branches merged).
-- **Next action:** **live deployment test** — the only thing left. Nothing else to build
-  for the Linux path. Run `devbox up` against real DigitalOcean and shake out
-  reality-only issues (doctl flags, cloud-init timing, OpenBao prod init/unseal,
-  clone-over-forwarded-agent). See the live runbook in `deploy/README.md`.
-- **Blocked on:** nothing to build. The live test is gated on the operator's DO token +
-  spend. Also pending (operator, non-blocking): rename local checkout `claude-configs/`
-  → `devbox/`.
+- **Linux path: live-verified (2026-06-17).** Provision + configure + vault + secrets +
+  V1/V2/V4 all confirmed on a real DO box (`178.128.85.201`). One note: `AUTOSEAL_TTL=5min`
+  is aggressive for interactive admin (see Phase 2c finding).
+- **Next action:** Windows/Azure (Phase 2b) is the only build work left. Optional Linux
+  follow-up: verify the standalone config-only path (D2, Phase 3) against this same box —
+  no new infra needed. Then delete this plan file once Windows ships.
+- **Blocked on:** nothing for Linux. Windows/Azure deferred. Also pending (operator,
+  non-blocking): rename local checkout `claude-configs/` → `devbox/`.
 
 ## Target repo structure
 
@@ -82,8 +83,7 @@ instructions. If we want devbox-repo-specific agent guidance, add a separate roo
 - [x] Rewrote the hook command in `settings.json` to
       `node "$HOME/.claude/hooks/git-write-guard.js"`; dropped the hardcoded
       `C:/Users/runegate-dev/...` path.
-- [ ] Q6: decide whether to add a separate root `CLAUDE.md` for repo-local agent
-      guidance (recommend: skip for now).
+- [x] Q6: no separate root `CLAUDE.md` for repo-local agent guidance — skipped.
 
 ### Phase 1 — Linux installer (C1, C2) — ✅ DONE
 - [x] `install.sh`: idempotently symlink `CLAUDE.md`, `settings.json`,
@@ -113,8 +113,10 @@ instructions. If we want devbox-repo-specific agent guidance, add a separate roo
       cloud-init; strict clone), M4 (guard wrapper bypasses + quoted-env regex),
       M5 (prune known_hosts on down; spec D4 carve-out for keys), L1/L2/L4. L3/L5
       documented. Re-verified: bash OK, guard 19/19, render valid YAML.
-- [ ] **Live apply (gated):** needs operator's DO token (`doctl auth init`) + the two
-      real pubkeys + explicit go-ahead. Costs money / creates real infra.
+- [x] **Live apply (2026-06-17):** real droplet `devbox` @ `178.128.85.201` (sgp1) was
+      provisioned via this flow and verified end-to-end — cloud-init `done`, `eddyg`,
+      toolchain, `~/.claude` install, firewall (only 2222 reachable; 8200 refused from
+      net). See Phase 3 / Phase 2c live-verify entries.
 
 ### Phase 2c — OpenBao vault on the box (`devbox vault`) — 🔨 BUILT, live-pending
 _Decisions (final): **OpenBao production mode** (`file` storage, sealed-on-disk),
@@ -131,21 +133,40 @@ vault path = `secret/<project>`. (Dev/in-memory mode removed.)_
 - [x] `devbox vault status`; app-read path documented in `deploy/README`.
 - [x] Static verify: `bash -n` clean; no dev-mode remnants; usage shows all vault cmds;
       `env_to_json` unit-tested (export/CRLF/spaces/`=`/junk).
-- [ ] **Live verify (gated, needs a box):** V4 — up → init → load → read back only from
-      inside SSH → confirm 8200 unreachable from the network → nothing after teardown.
-      Confirm: prod `bao server` starts as `eddyg`, `operator init/unseal` flow, kv-v2
-      `-mount=secret`, and `bao kv put -` stdin JSON all behave on a real box.
+- [x] **Live verify (2026-06-17, box `178.128.85.201`):** V4 DONE — round-trip verified
+      this session; teardown ("nothing usable after `down`") verified by the operator in
+      a prior run (box kept alive this session).
+      Confirmed: prod `bao server` runs as `eddyg` under **system** unit
+      `devbox-vault.service` (active/enabled; vendor `openbao.service` disabled), boots
+      **sealed**, 1-of-1 shamir, `file` storage; `vault unseal` from the laptop key works;
+      `vault load _v4test` (`.env`→JSON→`bao kv put -` stdin) and **read-back from inside
+      SSH** with the **scoped app token** round-tripped all 3 keys byte-exact (incl. a URL
+      with `=`/`&`); **`:8200` unreachable from the network** (curl from laptop times out —
+      only 2222 open); auto-seal timer + `devbox-secrets.service` (E8) present. Test secret
+      deleted, vault re-sealed, laptop throwaway removed. **Still unverified:** "nothing
+      after teardown" (kept the box — needs an actual `down`).
+      ⚠️ Finding: `AUTOSEAL_TTL=5min` re-sealed the vault mid-session and made a cleanup
+      `kv delete` fail with 503 — had to re-unseal. Not a bug (E9 by design), but 5min is
+      aggressive for interactive admin work; load-then-use promptly, or raise the TTL.
 
 ### Phase 2b — Azure / Windows (deferred)
 - [ ] Windows VM provisioning (`az` CLI or Terraform), NSG inbound 2222 only, no RDP.
 - [ ] `install.ps1` (Windows): mirror `install.sh`; verify on the Azure box.
 
 ### Phase 3 — verify & document (V1–V3)
-- [ ] End-to-end per OS: provision → connect from a device → `claude --version`,
-      `gh auth status`, guard fires on `git commit`, forwarded `git ls-remote` works.
-- [ ] Verify config-only mode against a pre-existing box (D2).
-- [ ] Update root `README.md`; write `deploy/README.md`.
-- [ ] Resolve spec open questions (N3, T4, T2 gh auth, P3 defaults, TF state).
+- [x] End-to-end **Linux** (2026-06-17, box `178.128.85.201`): `claude --version`
+      (2.1.178) ✅, `gh auth status` healthy (egunawan85, ssh) ✅, guard → `ask` on
+      `git commit` + wrapped `git -C … push`, silent on `git status` ✅ (V1), forwarded
+      agent visible on box + private `ls-remote` of `egunawan85/devbox` works (V2) ✅.
+      _(Windows end-to-end still pending — Phase 2b.)_
+- [x] Verify config-only mode against a pre-existing box (D2) — 2026-06-17,
+      `configure --host 178.128.85.201`: pinned host key, pulled repo over forwarded
+      agent (ff to `7727435`), idempotent install, toolchain+guard verify green,
+      session-secrets installed. Re-ran → "Already up to date", converged (D3), exit 0.
+- [x] Update root `README.md`; write `deploy/README.md` (deploy runbook done; root
+      README's Deploy section now reflects the built Linux path).
+- [x] Resolve spec open questions (N3, T4, T2 gh auth, P3 defaults, TF state) — all
+      captured in the spec's "Resolved decisions (2026-06-16)" section.
 - [ ] **Delete this plan file.**
 
 ## Decisions / defaults made
@@ -159,7 +180,10 @@ vault path = `secret/<project>`. (Dev/in-memory mode removed.)_
 
 ## Open decisions
 
-None block Phase 0–1. Resolve before the phase noted.
+**All resolved** — see the spec's "Resolved decisions (2026-06-16)" section. Q1/Q2
+auth = interactive (no secrets at rest); Q3 = `sgp1` / `s-2vcpu-4gb` / Ubuntu 24.04;
+Q4 (TF state) = moot, no Terraform; Q5 = SSH port 2222; Q6 = no root `CLAUDE.md`. Table
+kept for history.
 
 | # | Decision | Options | Blocks |
 |---|---|---|---|
@@ -250,6 +274,34 @@ _Append dated entries as work happens (newest last). Today: 2026-06-16._
   `devbox-app` token scoped to `secret/*`, not root; root stays on laptop), L1–L4. Branch
   `feat/devbox-vault` @ a19d02d. Two RT worktrees still on disk (devbox-vault-rt,
   devbox-vault-rt2). Live-pending.
+- **2026-06-17** **First live verification** against a real box (`178.128.85.201`,
+  sgp1). Read-only probes: box up as `eddyg`, cloud-init `done` + `devbox-ready` present,
+  toolchain all there (claude 2.1.178, gh 2.94, git 2.43, node v24.16, OpenBao 2.5.4);
+  `~/.claude` correctly symlinks CLAUDE.md/settings.json/hooks into the cloned repo;
+  vault initialized + sealed (prod/file/1-of-1) under **system** unit
+  `devbox-vault.service`. Then ran V4: unseal → `vault load _v4test` → read back inside
+  SSH (scoped app token) → all keys byte-exact → confirmed `:8200` unreachable from the
+  network → deleted the test secret → re-sealed. `gh` not yet authed (interactive, by
+  design — operator to run `gh auth login`); V1 gh-check, V2 agent-forward ls-remote, and
+  the post-teardown check remain. Observed `AUTOSEAL_TTL=5min` fire mid-session (sealed a
+  cleanup `kv delete` out → 503); flagged in Phase 2c. Box kept, vault re-sealed.
+- **2026-06-17** Completed live V1/V2 + closed V4. After operator ran `gh auth login`:
+  `gh auth status` healthy; guard fires `ask` on `git commit` / wrapped `git -C … push`,
+  silent on `git status`; forwarded agent visible on the box (`ssh-add -l` over `-A`) and
+  private `git ls-remote git@github.com:egunawan85/devbox` works (V2). V4 round-trip done
+  earlier this session; teardown ("nothing after `down`") confirmed by operator from a
+  prior run, so box kept alive. Marked Phase 2 live-apply + Phase 3 Linux end-to-end +
+  Phase 2c V4 done. Linux path is fully live-verified; only Windows/Azure (2b) + optional
+  D2 config-only check remain.
+- **2026-06-17** Re-ran the full Phase 2/2c **static** verification against current
+  `main` (after bad-VM detector, vault-under-systemd, session-secrets, auto-seal TTL,
+  bare-`devbox` install all landed post-RT). All green: `bash -n` on `devbox` +
+  both `install.sh`; `node --check` on the guard; `render` → valid cloud-init YAML
+  (parses, `#cloud-config`, substitution OK, key injected, no `__PLACEHOLDER__` left,
+  ASCII-clean); `env_to_json` unit cases (export/CRLF/spaces/`=`-in-value/junk/empty);
+  no dev-mode remnants; all 5 vault subcommands wired + documented; `help` renders.
+  The remaining Phase 2/2c items are the **live** tests only (need a real box + DO
+  token + spend). Also crossed out: Phase 0 Q6, Phase 3 READMEs + spec-open-questions.
 - **2026-06-16** Made `devbox up` one command (provision → configure → vault
   init/unseal → load all `~/devbox-secrets/*.env`), idempotent on re-run. Refactor:
   `vault_start` (server-start, returns seal-status), `vault_bringup` (init/unseal as
