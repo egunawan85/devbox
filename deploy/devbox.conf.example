@@ -30,6 +30,11 @@ REPO_DIR=/home/eddyg/devbox
 SECRETS_DIR="$HOME/devbox-secrets"
 # KV mount inside the box's OpenBao; a project lands at <mount>/<project>.
 VAULT_MOUNT=secret
+# Optional auto-seal TTL: if set, the vault re-seals this long after each unseal (a hard
+# timer, reset on every unseal). Empty = stay unsealed until reboot/manual seal. A systemd
+# timer on the box does it, using a seal-only token (can lock, can't read). Re-locks a
+# forgotten-unsealed vault; does NOT wipe already-materialized session .env files.
+#AUTOSEAL_TTL=5min        # e.g. 300, 5min, 1h  (empty/unset = disabled)
 
 # --- Provisioning resilience (bad-VM detector) ---
 # DigitalOcean occasionally hands you a droplet that boots "active" but is wedged at the

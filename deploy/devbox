@@ -51,6 +51,14 @@ load_conf() {
   # Optional: session-secrets manifest (maps vault projects -> app .env paths on the box).
   # If present, `configure`/`up` installs the login-time materializer (see install_session_secrets).
   SECRETS_MAP="${SECRETS_MAP:-$SCRIPT_DIR/secrets.map}"
+  # Optional: auto-seal TTL. If set (systemd duration, e.g. 5min), the vault re-seals that
+  # long after each unseal — a hard timer, reset on every unseal. Empty = off (stay unsealed).
+  : "${AUTOSEAL_TTL:=}"
+  # Alphanumeric only (e.g. 300, 5min, 1h) — it's interpolated into a systemd unit, so no
+  # spaces/specials. Empty = off. systemd validates the actual duration when it loads.
+  case "$AUTOSEAL_TTL" in
+    *[!0-9a-zA-Z]*) die "AUTOSEAL_TTL invalid: '$AUTOSEAL_TTL' (single token like 300, 5min, 1h)" ;;
+  esac
   # Provisioning resilience (bad-VM detector). DigitalOcean occasionally hands you a
   # droplet that boots "active" but is wedged at the hypervisor (no ping, no SSH, console
   # won't attach) — not a config problem. These knobs let `up` detect that fast (via a
@@ -645,6 +653,67 @@ curl -fsS "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null \
 EOF
 }
 
+# ---- auto-seal TTL (optional) -----------------------------------------------
+# OpenBao has no native unseal TTL, so a systemd timer on the box re-seals it N after each
+# unseal. Sealing needs sudo-on-sys/seal, which the scoped devbox-app token lacks — so we
+# mint a SEAL-ONLY token (policy: sys/seal only; cannot read any secret) for the timer to
+# use. Root stays on the laptop; the box gains only the ability to LOCK, never to read.
+
+# Mint the seal-only token on the box (idempotent — only if absent), using the laptop's
+# root token over stdin (never on argv, never stored on the box).
+ensure_sealer_token() {
+  local host=$1
+  [ -f "$VAULT_KEYS_FILE" ] || die "no $VAULT_KEYS_FILE — can't mint the seal-only token (init first)"
+  local root; root=$(jq -r '.root_token' "$VAULT_KEYS_FILE")
+  [ -n "$root" ] && [ "$root" != null ] || die "could not read root token from $VAULT_KEYS_FILE"
+  # Inline command (NOT a heredoc) so the root token piped on stdin reaches `$(cat)`; the
+  # policy goes via a temp file (not secret) so it doesn't compete for stdin. Token stays
+  # off argv. Idempotent: no-op if a seal-token already exists.
+  printf '%s' "$root" | ssh_box "$host" '
+    set -eu; umask 077
+    export BAO_ADDR=http://127.0.0.1:8200
+    tf="$HOME/.config/devbox/seal-token"
+    [ -s "$tf" ] && exit 0
+    export BAO_TOKEN="$(cat)"
+    mkdir -p "$HOME/.config/devbox"
+    pol=$(mktemp)
+    printf "%s" "path \"sys/seal\" { capabilities = [\"update\",\"sudo\"] }" > "$pol"
+    bao policy write devbox-sealer "$pol" >/dev/null
+    rm -f "$pol"
+    tok=$(bao token create -policy=devbox-sealer -period=768h -format=json | jq -r .auth.client_token)
+    [ -n "$tok" ] && [ "$tok" != null ] || { echo SEALER_TOKEN_FAILED >&2; exit 1; }
+    printf "%s" "$tok" > "$tf"; chmod 600 "$tf"
+  '
+}
+
+# Arm/refresh the auto-seal timer. No-op if AUTOSEAL_TTL is empty. Call after each unseal.
+autoseal_arm() {
+  local host=$1
+  [ -n "${AUTOSEAL_TTL:-}" ] || return 0
+  ensure_sealer_token "$host"
+  ssh_box "$host" "AUTOSEAL_TTL='$AUTOSEAL_TTL' bash -s" <<'EOF'
+set -eu
+home="$HOME"; baobin="$(command -v bao)"
+svc=/etc/systemd/system/devbox-vault-autoseal.service
+tmr=/etc/systemd/system/devbox-vault-autoseal.timer
+wantsvc="[Unit]
+Description=devbox auto-seal the vault (TTL after unseal)
+[Service]
+Type=oneshot
+User=$(id -un)
+ExecStart=/bin/sh -c 'BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN=\"\$(cat $home/.config/devbox/seal-token)\" exec $baobin operator seal'"
+wanttmr="[Timer]
+OnActiveSec=$AUTOSEAL_TTL
+AccuracySec=1s"
+changed=0
+[ "$(sudo cat "$svc" 2>/dev/null || true)" = "$wantsvc" ] || { printf '%s\n' "$wantsvc" | sudo tee "$svc" >/dev/null; changed=1; }
+[ "$(sudo cat "$tmr" 2>/dev/null || true)" = "$wanttmr" ] || { printf '%s\n' "$wanttmr" | sudo tee "$tmr" >/dev/null; changed=1; }
+[ "$changed" = 0 ] || sudo systemctl daemon-reload
+sudo systemctl restart devbox-vault-autoseal.timer    # (re)start the countdown from now
+EOF
+  log "auto-seal armed — vault re-seals ${AUTOSEAL_TTL} after unseal (timer reset now)"
+}
+
 # Bring the vault to READY: start the server, then init (fresh box) or unseal (sealed)
 # as needed. Idempotent. Used by both `up` and `vault up`.
 vault_bringup() {
@@ -661,6 +730,7 @@ vault_bringup() {
   if   [ "$inited" != "true"  ]; then vault_init
   elif [ "$sealed" != "false" ]; then vault_unseal
   else log "vault already initialized + unsealed."; fi
+  autoseal_arm "$host"   # (re)arm the auto-seal timer if AUTOSEAL_TTL is set
 }
 
 # `devbox vault up` — same readiness as part of `devbox up`.
@@ -752,6 +822,7 @@ vault_unseal() {
   [ "$(printf '%s' "$resp" | jq -r '.sealed' 2>/dev/null)" = "false" ] \
     || die "unseal failed (vault still sealed) — verify the key in $VAULT_KEYS_FILE matches this box"
   log "vault unsealed."
+  autoseal_arm "$host"   # (re)arm the auto-seal timer if AUTOSEAL_TTL is set
 }
 
 # Push a project's local .env into the box's vault at <mount>/<project>.
