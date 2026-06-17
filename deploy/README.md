@@ -130,6 +130,15 @@ placed there, nor your local `./secrets` or the vault. Plaintext still lives in 
 in use (inherent — see runtime exposure in the spec); this only removes the at-rest-on-disk
 exposure of Case-2 file materialization.
 
+> **"Logout" means your *last* session ends — including ones you forgot about.** Cleanup
+> fires when logind stops your user manager, i.e. when **no** `eddyg` session remains. A
+> **VS Code Remote-SSH** window leaves a `vscode-server` running on the box (a live
+> session) even after you close the editor, so the wipe won't fire until that ends too —
+> via VS Code's "Kill VS Code Server on Host" / "Close Remote Connection", its idle
+> auto-shutdown, or a reboot. Same goes for a lingering `tmux`/`mosh`/backgrounded process.
+> To confirm a wipe, check from *outside* a session (a root watcher) — logging in to look
+> re-materializes it. (tmpfs is gone on reboot regardless.)
+
 **Honest notes:**
 - **Production mode**, single unseal key (1-of-1). The vault starts **sealed**
   (encrypted on disk); your **unseal key + root token live on your laptop**
