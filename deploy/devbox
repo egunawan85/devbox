@@ -219,7 +219,9 @@ cmd_up() {
     [ -n "$key_ids" ] || die "no ssh keys resolved"
     ensure_tag        # firewall's --tag-names requires the tag to pre-exist
     ensure_firewall
-    ud=$(mktemp); trap 'rm -f "$ud"' EXIT
+    # ${ud:-} so this EXIT trap is safe even though it fires after cmd_up returns,
+    # when the function-local 'ud' is out of scope (set -u would otherwise abort here).
+    ud=$(mktemp); trap 'rm -f "${ud:-}"' EXIT
     render_cloud_init >"$ud"
     log "creating droplet '$DROPLET_NAME' ($SIZE, $IMAGE, $REGION)"
     doctl compute droplet create "$DROPLET_NAME" \
@@ -227,6 +229,7 @@ cmd_up() {
       --ssh-keys "$key_ids" --tag-names "$TAG" \
       --user-data-file "$ud" --wait \
       --format ID,PublicIPv4 --no-header >/dev/null
+    rm -f "$ud"   # user-data consumed by create; remove now (in scope), trap is just a backstop
     ip=$(wait_for_ip) || die "droplet created but no public IP after ~60s — check 'doctl compute droplet get $DROPLET_NAME'"
     log "droplet at $ip"
     wait_for_box "$ip"
