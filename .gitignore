@@ -6,6 +6,10 @@ deploy/devbox.conf
 # box's vault by `devbox vault load`). PLAINTEXT SECRETS — never commit.
 /secrets/
 
+# Operator-local session-secrets manifest (maps vault projects -> app .env paths).
+# Not secret values, but machine/app-specific — see deploy/secrets.map.example.
+deploy/secrets.map
+
 # Local Claude session overrides.
 .claude/settings.local.json
 

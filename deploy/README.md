@@ -95,6 +95,33 @@ set -a; eval "$(bao kv get -mount=secret -format=json myapp \
 Tear the box down → its vault storage and keys are gone → on the next box, `vault up` +
 `vault init` + `vault load` again (**re-init per box**: each box gets fresh keys).
 
+### On-login materialization into app `.env` files (optional)
+
+If your app reads a `.env` *file* (rather than env vars), devbox can materialize the vault
+secrets into those files **on SSH login** and wipe them **when your last session ends** —
+keeping plaintext only in RAM (tmpfs), never on the box's disk.
+
+Opt in by creating `deploy/secrets.map` (gitignored; copy `deploy/secrets.map.example`)
+that maps each vault project to its destination path on the box:
+
+```
+frontend   /home/eddyg/apps/frontend/.env
+backend    /home/eddyg/apps/backend/.env
+```
+
+`configure`/`up` then installs a hook + a systemd **user** service on the box. On login it
+symlinks each project's secrets into its `.env` (a link into `/dev/shm` tmpfs); on the
+**last** logout or dropped connection it wipes them (logind reference-counts your sessions,
+so a second open session is never disturbed). The project name and the dest filename are
+independent, so many apps can each use a plain `.env` (the directory disambiguates).
+
+Caveats: the vault must be **unsealed first** (`vault unseal` from your laptop) — if it's
+sealed at login the hook skips with a notice (`systemctl --user restart devbox-secrets`
+after unsealing). Cleanup only removes the symlink + the RAM copy — never a real file you
+placed there, nor your local `./secrets` or the vault. Plaintext still lives in RAM while
+in use (inherent — see runtime exposure in the spec); this only removes the at-rest-on-disk
+exposure of Case-2 file materialization.
+
 **Honest notes:**
 - **Production mode**, single unseal key (1-of-1). The vault starts **sealed**
   (encrypted on disk); your **unseal key + root token live on your laptop**

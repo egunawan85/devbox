@@ -48,6 +48,9 @@ load_conf() {
   : "${VAULT_MOUNT:=secret}"
   : "${SECRETS_DIR:=$HOME/devbox-secrets}"
   VAULT_KEYS_FILE="${VAULT_KEYS_FILE:-$HOME/.config/devbox/vault-keys.json}"
+  # Optional: session-secrets manifest (maps vault projects -> app .env paths on the box).
+  # If present, `configure`/`up` installs the login-time materializer (see install_session_secrets).
+  SECRETS_MAP="${SECRETS_MAP:-$SCRIPT_DIR/secrets.map}"
   # Provisioning resilience (bad-VM detector). DigitalOcean occasionally hands you a
   # droplet that boots "active" but is wedged at the hypervisor (no ping, no SSH, console
   # won't attach) — not a config problem. These knobs let `up` detect that fast (via a
@@ -362,6 +365,113 @@ cmd_up() {
   log "devbox ready — connect: $(basename "$0") ssh"
 }
 
+# ---- session secrets (login-time vault -> app .env on tmpfs) ----------------
+# Optional feature, opt-in by the presence of a local secrets.map. On SSH login it
+# materializes each mapped vault project into the app's .env path (a symlink into
+# /dev/shm tmpfs — RAM, never disk); on the LAST logout/disconnect it wipes them.
+# Lifecycle is a systemd *user* service: logind keeps the user manager alive while any
+# session exists and stops it at the last one (incl. dropped connections), so cleanup is
+# reference-counted natively. The vault must be unsealed (from the laptop) first.
+
+# Validate + normalize the local manifest -> "<project> <abs-dest>" lines on stdout.
+validate_secrets_map() {
+  local f=$1 proj dest rest out=""
+  while read -r proj dest rest; do
+    case "$proj" in ''|\#*) continue ;; esac
+    [ -n "$dest" ] || { echo "secrets.map: project '$proj' has no dest path" >&2; return 1; }
+    case "$proj" in *[!a-zA-Z0-9._-]*) echo "secrets.map: invalid project name '$proj'" >&2; return 1 ;; esac
+    case "$dest" in /*) ;; *) echo "secrets.map: dest must be an absolute path: '$dest'" >&2; return 1 ;; esac
+    case "$dest" in *..*) echo "secrets.map: dest must not contain '..': '$dest'" >&2; return 1 ;; esac
+    out="${out}${proj} ${dest}
+"
+  done < "$f"
+  printf '%s' "$out"
+}
+
+install_session_secrets() {
+  local host=$1
+  [ -f "$SECRETS_MAP" ] || { log "no secrets.map at $SECRETS_MAP — skipping session-secrets setup"; return 0; }
+  local clean; clean=$(validate_secrets_map "$SECRETS_MAP") || die "invalid $SECRETS_MAP (see above)"
+  [ -n "$clean" ] || { log "secrets.map has no mappings — skipping session-secrets setup"; return 0; }
+  ssh_box "$host" 'true'
+  log "installing session-secrets (login-time vault -> .env materialization) on $host"
+  # 1) static hook script + systemd user unit + enable (idempotent).
+  ssh_box "$host" 'bash -s' <<'EOF'
+set -eu
+mkdir -p "$HOME/.config/devbox" "$HOME/.config/systemd/user/default.target.wants"
+cat > "$HOME/.config/devbox/session-secrets.sh" <<'HOOK'
+#!/usr/bin/env bash
+# devbox session-secrets: vault -> app .env on tmpfs (RAM) while logged in; wiped at last
+# logout. Driven by ~/.config/devbox/secrets.map. Managed by devbox-secrets.service.
+set -uo pipefail
+RAM=/dev/shm/devbox-secrets
+MAP="$HOME/.config/devbox/secrets.map"
+ENVF="$HOME/.config/devbox/vault.env"
+[ -f "$MAP" ] || exit 0
+case "${1:-}" in
+  in)
+    [ -f "$ENVF" ] || exit 0
+    . "$ENVF"
+    if ! curl -fsS --max-time 3 "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null | jq -e '.sealed==false' >/dev/null 2>&1; then
+      echo "devbox-secrets: vault sealed/down — unseal from your laptop, then: systemctl --user restart devbox-secrets" >&2
+      exit 0
+    fi
+    mkdir -p "$RAM"; chmod 700 "$RAM"
+    while read -r proj dest rest; do
+      case "$proj" in ''|\#*) continue ;; esac
+      [ -n "${dest:-}" ] || continue
+      if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+        echo "devbox-secrets: $dest exists and is not our symlink — skipping (move it aside to use the vault copy)" >&2
+        continue
+      fi
+      if ! ( umask 077; bao kv get -mount=secret -format=json "$proj" 2>/dev/null \
+               | jq -r '.data.data | to_entries[] | "\(.key)=\(.value)"' > "$RAM/$proj.env" ) || [ ! -s "$RAM/$proj.env" ]; then
+        echo "devbox-secrets: could not read secret/$proj — skipping (is it loaded?)" >&2
+        rm -f "$RAM/$proj.env"; continue
+      fi
+      mkdir -p "$(dirname "$dest")"
+      ln -sfn "$RAM/$proj.env" "$dest"
+    done < "$MAP"
+    ;;
+  out)
+    while read -r proj dest rest; do
+      case "$proj" in ''|\#*) continue ;; esac
+      [ -n "${dest:-}" ] || continue
+      [ -L "$dest" ] && rm -f "$dest"          # only remove OUR symlink, never a real file
+      rm -f "$RAM/$proj.env"
+    done < "$MAP"
+    rmdir "$RAM" 2>/dev/null || true
+    ;;
+  *) echo "usage: session-secrets.sh in|out" >&2; exit 2 ;;
+esac
+HOOK
+chmod 700 "$HOME/.config/devbox/session-secrets.sh"
+cat > "$HOME/.config/systemd/user/devbox-secrets.service" <<'UNIT'
+[Unit]
+Description=Materialize devbox vault secrets to tmpfs while logged in
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/.config/devbox/session-secrets.sh in
+ExecStop=%h/.config/devbox/session-secrets.sh out
+
+[Install]
+WantedBy=default.target
+UNIT
+# Enable by hand (robust without an active user manager): symlink into default.target.wants.
+ln -sf "$HOME/.config/systemd/user/devbox-secrets.service" \
+       "$HOME/.config/systemd/user/default.target.wants/devbox-secrets.service"
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+systemctl --user daemon-reload 2>/dev/null || true
+systemctl --user start devbox-secrets.service 2>/dev/null || true   # materialize now for this session
+loginctl disable-linger "$(id -un)" 2>/dev/null || true             # stop user mgr at last logout
+EOF
+  # 2) push the validated manifest (data) over stdin, owner-only.
+  printf '%s' "$clean" | ssh_box "$host" 'umask 077; cat > "$HOME/.config/devbox/secrets.map"'
+  log "session-secrets installed — on login each mapped project materializes to its .env (tmpfs); wiped at last logout."
+}
+
 cmd_configure() {
   load_conf
   local host="" os="linux"
@@ -405,6 +515,7 @@ guard=$(printf '{"tool_input":{"command":"git push"}}' | node "$HOME/.claude/hoo
 case "$guard" in *'"permissionDecision":"ask"'*) echo "  ok    git-write-guard fires" ;; *) echo "  FAIL  git-write-guard"; bad=$((bad+1)) ;; esac
 [ "$bad" -eq 0 ] && echo "verify: all checks passed" || { echo "verify: $bad check(s) failed"; exit 1; }
 EOF
+  install_session_secrets "$host"   # opt-in: only if a local secrets.map exists
   log "done — connect with: $(basename "$0") ssh"
 }
 
