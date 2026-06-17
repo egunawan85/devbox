@@ -142,6 +142,17 @@ Tear the box down → its vault storage and keys are gone → on the next box, `
   cloud-init fails before that (or sshd can't bind 2222 — in which case `devbox-ready`
   is deliberately not written and `up` reports a timeout), use the **DigitalOcean web
   console** to get in.
+- **Bad-VM detector (auto-recreate).** DigitalOcean occasionally hands you a droplet that
+  boots "active" but is wedged at the hypervisor — no SSH, no ping, the web console won't
+  even attach. That's infrastructure, not your config. `up` detects this fast: during
+  provisioning it temporarily allows **ICMP from your public IP only** (auto-removed when
+  done) and pings for liveness. No response within `LIVENESS_TIMEOUT` (default 240s) ⇒
+  bad VM ⇒ it destroys the droplet and recreates on a fresh host (up to
+  `PROVISION_ATTEMPTS`, default 2). It also catches a box that dies *mid-install*
+  (`DEATH_STREAK` consecutive missed pings after being alive). Tune via `devbox.conf`;
+  set `LIVENESS_PROBE=off` to disable (falls back to the SSH-only `READINESS_TIMEOUT`
+  wait). A single dropped ping never triggers a false verdict — liveness needs only one
+  success, and "died" needs a sustained streak.
 - **Ubuntu 24.04 SSH socket.** 24.04 socket-activates SSH, so the listening port is
   set by `ssh.socket`, not just `sshd_config`. `cloud-init.yaml` overrides both, then
   verifies sshd is actually listening on the port before signaling ready.

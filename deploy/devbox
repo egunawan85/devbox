@@ -48,6 +48,16 @@ load_conf() {
   : "${VAULT_MOUNT:=secret}"
   : "${SECRETS_DIR:=$HOME/devbox-secrets}"
   VAULT_KEYS_FILE="${VAULT_KEYS_FILE:-$HOME/.config/devbox/vault-keys.json}"
+  # Provisioning resilience (bad-VM detector). DigitalOcean occasionally hands you a
+  # droplet that boots "active" but is wedged at the hypervisor (no ping, no SSH, console
+  # won't attach) — not a config problem. These knobs let `up` detect that fast (via a
+  # scoped ICMP liveness probe) and recreate on a fresh host instead of a long timeout.
+  : "${LIVENESS_PROBE:=on}"        # on|off — temporarily allow ICMP from your IP to probe liveness
+  : "${LIVENESS_TIMEOUT:=240}"     # secs: no ping AND no SSH within this => declare bad VM
+  : "${READINESS_TIMEOUT:=1200}"   # secs: overall budget for cloud-init to finish the install
+  : "${PROVISION_ATTEMPTS:=2}"     # total create attempts (>1 => auto-recreate on a bad VM)
+  : "${PROBE_INTERVAL:=10}"        # secs between probes
+  : "${DEATH_STREAK:=6}"           # consecutive missed pings (after being alive) => died mid-install
 }
 
 doctl_ready() {
@@ -81,6 +91,20 @@ wait_for_ip() {
     i=$((i + 1)); sleep 2
   done
   return 1
+}
+
+# Delete the droplet (by name), wait for it to actually disappear, and prune it from
+# known_hosts (M5). Leaves the firewall/tag/ssh-keys intact — used both by `down` and by
+# the bad-VM retry, which recreates onto the same firewall. $1 = IP to prune (optional).
+delete_droplet() {
+  local ip=${1:-} i=0
+  log "deleting droplet '$DROPLET_NAME'"
+  doctl compute droplet delete "$DROPLET_NAME" --force >/dev/null 2>&1 || true
+  while [ "$i" -lt 30 ] && [ -n "$(droplet_id)" ]; do i=$((i + 1)); sleep 3; done
+  if [ -n "$ip" ]; then
+    ssh-keygen -R "[$ip]:$SSH_PORT" >/dev/null 2>&1 || true
+    ssh-keygen -R "$ip"             >/dev/null 2>&1 || true
+  fi
 }
 
 ensure_ssh_keys() { # echoes a comma-joined list of DO ssh-key IDs for our pubkeys
@@ -138,6 +162,44 @@ ensure_firewall() {
   fi
 }
 
+# ---- bad-VM liveness probe ------------------------------------------------
+# A wedged DigitalOcean host boots "active" but never services the network (no SSH, no
+# ICMP, console won't even attach). The firewall is normally tcp/$SSH_PORT-only, and that
+# port opens only late in cloud-init — so without an out-of-band signal we can't tell
+# "slow install" from "dead box" for ~20 min. ICMP from the operator's IP gives that
+# signal in minutes; we add the rule only for the probe window and revoke it after.
+
+operator_ip() { # echo the operator's public IPv4 (cached); empty if undiscoverable
+  if [ -z "${OPERATOR_IP+x}" ]; then
+    OPERATOR_IP=$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null \
+      || curl -4 -fsS --max-time 8 https://ifconfig.me 2>/dev/null || true)
+  fi
+  printf '%s' "$OPERATOR_IP"
+}
+
+ping_alive() { # 0 if host answers one ICMP echo within ~2s (portable mac/linux)
+  case "$(uname)" in
+    Darwin) ping -c1 -t2 "$1" >/dev/null 2>&1 ;;
+    *)      ping -c1 -W2 "$1" >/dev/null 2>&1 ;;
+  esac
+}
+
+# Add ('on') or remove ('off') a scoped ICMP inbound rule from the operator's IP, so the
+# liveness probe can ping. No-op (returns 0) if the IP can't be found or the firewall is
+# absent — the probe then simply degrades to SSH-only detection.
+firewall_set_icmp() {
+  local mode=$1 fw opip
+  opip=$(operator_ip); [ -n "$opip" ] || return 0
+  fw=$(doctl compute firewall list --format ID,Name --no-header \
+    | awk -v n="$FIREWALL_NAME" '$2==n {print $1; exit}')
+  [ -n "$fw" ] || return 0
+  if [ "$mode" = on ]; then
+    doctl compute firewall add-rules    "$fw" --inbound-rules "protocol:icmp,address:$opip/32" >/dev/null 2>&1 || true
+  else
+    doctl compute firewall remove-rules "$fw" --inbound-rules "protocol:icmp,address:$opip/32" >/dev/null 2>&1 || true
+  fi
+}
+
 render_cloud_init() { # -> stdout
   local f keys=""
   for f in $SSH_PUBKEY_FILES; do
@@ -179,17 +241,47 @@ ssh_box() {
       "$DEVBOX_USER@$ip" "$@"
 }
 
+# A box is READY when cloud-init is done AND the devbox-ready marker exists. We probe
+# readiness over SSH (non-blocking status check, so we can interleave a liveness probe).
+box_ready() {
+  ssh_box "$1" 'cloud-init status 2>/dev/null | grep -q "status: done" && test -f /var/lib/cloud/devbox-ready' 2>/dev/null
+}
+
+# Wait for a box, distinguishing a healthy-but-installing box from a wedged bad VM.
+#   $2 = "on" to use the ICMP liveness probe (caller must have allowed ICMP first).
+# Returns: 0 ready | 1 readiness timeout (alive but cloud-init never finished) | 2 bad VM.
 wait_for_box() {
-  local ip=$1 i=0
-  log "waiting for SSH on $ip:$SSH_PORT and cloud-init to finish (a few minutes)"
-  while [ "$i" -lt 60 ]; do
-    if ssh_box "$ip" 'cloud-init status --wait >/dev/null 2>&1 || true; test -f /var/lib/cloud/devbox-ready' 2>/dev/null; then
-      log "box is ready"
-      return 0
+  local ip=$1 probe=${2:-off}
+  local t0=$SECONDS first_alive=0 fails=0 elapsed
+  if [ "$probe" = on ]; then
+    log "waiting for $ip:$SSH_PORT — liveness <= ${LIVENESS_TIMEOUT}s, then cloud-init <= ${READINESS_TIMEOUT}s"
+  else
+    log "waiting for SSH on $ip:$SSH_PORT and cloud-init to finish (a few minutes)"
+  fi
+  while :; do
+    elapsed=$(( SECONDS - t0 ))
+    if box_ready "$ip"; then log "box is ready"; return 0; fi
+    if [ "$probe" = on ]; then
+      if ping_alive "$ip"; then first_alive=1; fails=0; else fails=$((fails + 1)); fi
+      # Never came alive within the liveness window => wedged at the hypervisor (bad VM).
+      if [ "$first_alive" -eq 0 ] && [ "$elapsed" -ge "$LIVENESS_TIMEOUT" ]; then
+        warn "no liveness from $ip after ${LIVENESS_TIMEOUT}s (no ICMP, no SSH) while DO reports 'active' — almost certainly a BAD DigitalOcean VM, not your config"
+        return 2
+      fi
+      # Was alive, then went dark for DEATH_STREAK probes => died mid-install (OOM/host).
+      if [ "$first_alive" -eq 1 ] && [ "$fails" -ge "$DEATH_STREAK" ]; then
+        warn "$ip stopped responding for ~$((DEATH_STREAK * PROBE_INTERVAL))s after being alive — likely died mid-install (OOM/host failure)"
+        return 2
+      fi
     fi
-    i=$((i + 1)); sleep 10
+    if [ "$elapsed" -ge "$READINESS_TIMEOUT" ]; then
+      # No probe and nothing ever responded: can't prove bad-VM, but it never came up.
+      [ "$probe" = on ] && [ "$first_alive" -eq 0 ] && return 2
+      warn "timed out after ${READINESS_TIMEOUT}s waiting on $ip — reachable but cloud-init never wrote devbox-ready; check /var/log/cloud-init-output.log via '$(basename "$0") ssh'"
+      return 1
+    fi
+    sleep "$PROBE_INTERVAL"
   done
-  die "timed out waiting for $ip:$SSH_PORT — check the DigitalOcean console"
 }
 
 # ---- subcommands -----------------------------------------------------------
@@ -207,32 +299,61 @@ cmd_status() {
 # One command, end to end: provision (if absent) -> configure -> vault ready
 # (start + init/unseal as needed) -> load every ~/devbox-secrets/<proj>.env.
 # Idempotent: re-running on an existing box just re-converges every step.
-cmd_up() {
-  load_conf; doctl_ready
-  local ip key_ids ud
-  if [ -n "$(droplet_id)" ]; then
-    ip=$(wait_for_ip) || die "droplet '$DROPLET_NAME' exists but has no public IP yet — wait a moment and re-run (NOT creating a duplicate)"
-    log "droplet '$DROPLET_NAME' already exists at $ip"
-    wait_for_box "$ip"   # an existing box may still be mid cloud-init; gate on devbox-ready before configure
-  else
-    key_ids=$(ensure_ssh_keys)
-    [ -n "$key_ids" ] || die "no ssh keys resolved"
-    ensure_tag        # firewall's --tag-names requires the tag to pre-exist
-    ensure_firewall
-    # ${ud:-} so this EXIT trap is safe even though it fires after cmd_up returns,
-    # when the function-local 'ud' is out of scope (set -u would otherwise abort here).
-    ud=$(mktemp); trap 'rm -f "${ud:-}"' EXIT
-    render_cloud_init >"$ud"
+# Create the droplet and bring it to ready, auto-recreating on a bad VM. Sets the global
+# PROVISIONED_IP on success; dies on failure. Manages the temporary ICMP liveness probe
+# (added once, removed at script EXIT so it's cleaned even on error).
+provision_droplet() {
+  local key_ids; key_ids=$(ensure_ssh_keys)
+  [ -n "$key_ids" ] || die "no ssh keys resolved"
+  ensure_tag        # firewall's --tag-names requires the tag to pre-exist
+  ensure_firewall
+  local probe=off
+  if [ "$LIVENESS_PROBE" = on ] && [ -n "$(operator_ip)" ]; then
+    probe=on
+    log "enabling temporary ICMP liveness probe from $(operator_ip) (auto-removed when done)"
+    firewall_set_icmp on
+    trap 'firewall_set_icmp off' EXIT   # ensure the ICMP rule is revoked even on error
+  fi
+  local attempt=1 rc ip ud
+  while [ "$attempt" -le "$PROVISION_ATTEMPTS" ]; do
+    [ "$PROVISION_ATTEMPTS" -gt 1 ] && log "provisioning attempt $attempt/$PROVISION_ATTEMPTS"
+    ud=$(mktemp); render_cloud_init >"$ud"
     log "creating droplet '$DROPLET_NAME' ($SIZE, $IMAGE, $REGION)"
     doctl compute droplet create "$DROPLET_NAME" \
       --region "$REGION" --size "$SIZE" --image "$IMAGE" \
       --ssh-keys "$key_ids" --tag-names "$TAG" \
       --user-data-file "$ud" --wait \
       --format ID,PublicIPv4 --no-header >/dev/null
-    rm -f "$ud"   # user-data consumed by create; remove now (in scope), trap is just a backstop
-    ip=$(wait_for_ip) || die "droplet created but no public IP after ~60s — check 'doctl compute droplet get $DROPLET_NAME'"
-    log "droplet at $ip"
-    wait_for_box "$ip"
+    rm -f "$ud"
+    if ip=$(wait_for_ip); then
+      log "droplet at $ip"
+      wait_for_box "$ip" "$probe"; rc=$?
+    else
+      warn "droplet created but no public IP after ~60s"; rc=2
+    fi
+    if [ "$rc" -eq 0 ]; then PROVISIONED_IP="$ip"; return 0; fi
+    if [ "$rc" -eq 2 ] && [ "$attempt" -lt "$PROVISION_ATTEMPTS" ]; then
+      warn "attempt $attempt failed (bad VM) — destroying and recreating on a fresh host"
+      delete_droplet "${ip:-}"
+      attempt=$((attempt + 1)); continue
+    fi
+    [ "$rc" -eq 2 ] && die "provisioning failed after $attempt attempt(s): kept landing on wedged DigitalOcean hosts. Try again shortly, or a different REGION/SIZE (raise PROVISION_ATTEMPTS to retry more)."
+    die "provisioning: $ip is reachable but cloud-init never finished within ${READINESS_TIMEOUT}s — '$(basename "$0") ssh' and check /var/log/cloud-init-output.log"
+  done
+  die "provisioning failed after $PROVISION_ATTEMPTS attempt(s)"
+}
+
+cmd_up() {
+  load_conf; doctl_ready
+  local ip
+  if [ -n "$(droplet_id)" ]; then
+    ip=$(wait_for_ip) || die "droplet '$DROPLET_NAME' exists but has no public IP yet — wait a moment and re-run (NOT creating a duplicate)"
+    log "droplet '$DROPLET_NAME' already exists at $ip"
+    # An existing box may still be mid cloud-init; gate on devbox-ready before configure.
+    wait_for_box "$ip" off || die "existing droplet '$DROPLET_NAME' ($ip) is not becoming ready — it may be wedged; '$(basename "$0") down' then '$(basename "$0") up' to recreate"
+  else
+    provision_droplet           # sets PROVISIONED_IP; auto-recreates on a bad VM; dies on failure
+    ip="$PROVISIONED_IP"
   fi
   cmd_configure --host "$ip"
   VAULT_HOST="$ip"            # reuse this IP for the vault steps (no extra lookups)
@@ -306,14 +427,7 @@ cmd_down() {
       "$DROPLET_NAME" "${ip:-none}" "$FIREWALL_NAME" >&2
     read -r ans; case "$ans" in y|Y|yes) ;; *) die "aborted" ;; esac
   fi
-  if [ -n "$ip" ]; then
-    log "deleting droplet '$DROPLET_NAME'"
-    doctl compute droplet delete "$DROPLET_NAME" --force
-    # Prune the box from known_hosts so a recycled IP doesn't trip a key mismatch (M5).
-    log "pruning $ip from your known_hosts"
-    ssh-keygen -R "[$ip]:$SSH_PORT" >/dev/null 2>&1 || true
-    ssh-keygen -R "$ip" >/dev/null 2>&1 || true
-  fi
+  [ -n "$ip" ] && delete_droplet "$ip"
   local fw_id
   fw_id=$(doctl compute firewall list --format ID,Name --no-header \
     | awk -v n="$FIREWALL_NAME" '$2==n {print $1; exit}')

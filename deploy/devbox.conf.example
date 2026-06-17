@@ -30,3 +30,16 @@ REPO_DIR=/home/eddyg/devbox
 SECRETS_DIR="$HOME/devbox-secrets"
 # KV mount inside the box's OpenBao; a project lands at <mount>/<project>.
 VAULT_MOUNT=secret
+
+# --- Provisioning resilience (bad-VM detector) ---
+# DigitalOcean occasionally hands you a droplet that boots "active" but is wedged at the
+# hypervisor (no SSH, no ping, console won't attach) — not a config problem. `up` detects
+# this fast via a scoped ICMP liveness probe (temporarily allows ICMP from YOUR public IP
+# only, auto-removed) and recreates on a fresh host instead of a ~20-min silent timeout.
+# Defaults shown; uncomment to override.
+#LIVENESS_PROBE=on        # on|off — set off to disable the ICMP probe (falls back to SSH-only wait)
+#LIVENESS_TIMEOUT=240     # secs with no ping AND no SSH before declaring a bad VM
+#READINESS_TIMEOUT=1200   # secs budget for cloud-init to finish the install
+#PROVISION_ATTEMPTS=2     # total create attempts; >1 auto-recreates on a bad VM
+#PROBE_INTERVAL=10        # secs between probes
+#DEATH_STREAK=6           # consecutive missed pings (after being alive) => died mid-install
