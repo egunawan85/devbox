@@ -78,6 +78,14 @@ reopens it from your saved key (no re-init). If for some reason the server isn't
 `deploy/devbox vault up` starts it and unseals in one step. (Server logs:
 `~/.config/devbox/openbao.log` or `journalctl -u devbox-vault`.)
 
+**Auto-seal TTL (optional).** Set `AUTOSEAL_TTL` (e.g. `5min`) in `devbox.conf` and the
+vault re-seals that long after each unseal — a hard timer, reset on every `vault unseal`.
+A systemd timer on the box (`devbox-vault-autoseal.timer`) does it, using a **seal-only**
+token (policy `devbox-sealer`, capability `sys/seal` only — it can lock the vault but
+**cannot read any secret**; root stays on your laptop). This re-locks a forgotten-unsealed
+vault even after you disconnect. It does **not** wipe `.env` files already materialized to
+tmpfs (those still die at logout) — it just blocks new reads/loads until you re-unseal.
+
 Then, on the box, an app reads them:
 
 ```sh
