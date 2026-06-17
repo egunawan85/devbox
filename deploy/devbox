@@ -417,7 +417,7 @@ case "${1:-}" in
       exit 0
     fi
     mkdir -p "$RAM"; chmod 700 "$RAM"
-    while read -r proj dest rest; do
+    while read -r proj dest rest || [ -n "$proj" ]; do   # || ... = also handle a final line with no trailing newline
       case "$proj" in ''|\#*) continue ;; esac
       [ -n "${dest:-}" ] || continue
       if [ -e "$dest" ] && [ ! -L "$dest" ]; then
@@ -434,7 +434,7 @@ case "${1:-}" in
     done < "$MAP"
     ;;
   out)
-    while read -r proj dest rest; do
+    while read -r proj dest rest || [ -n "$proj" ]; do
       case "$proj" in ''|\#*) continue ;; esac
       [ -n "${dest:-}" ] || continue
       [ -L "$dest" ] && rm -f "$dest"          # only remove OUR symlink, never a real file
@@ -467,8 +467,9 @@ systemctl --user daemon-reload 2>/dev/null || true
 systemctl --user start devbox-secrets.service 2>/dev/null || true   # materialize now for this session
 loginctl disable-linger "$(id -un)" 2>/dev/null || true             # stop user mgr at last logout
 EOF
-  # 2) push the validated manifest (data) over stdin, owner-only.
-  printf '%s' "$clean" | ssh_box "$host" 'umask 077; cat > "$HOME/.config/devbox/secrets.map"'
+  # 2) push the validated manifest (data) over stdin, owner-only. Trailing newline matters:
+  # $(...) stripped it from $clean, and `while read` would skip an unterminated final line.
+  printf '%s\n' "$clean" | ssh_box "$host" 'umask 077; cat > "$HOME/.config/devbox/secrets.map"'
   log "session-secrets installed — on login each mapped project materializes to its .env (tmpfs); wiped at last logout."
 }
 
