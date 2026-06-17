@@ -24,7 +24,16 @@
 # `doctl auth init` or DIGITALOCEAN_ACCESS_TOKEN.
 set -euo pipefail
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Resolve symlinks so a `devbox` symlink on PATH still finds devbox.conf /
+# cloud-init.yaml next to the *real* script (BSD/macOS readlink has no -f, so
+# walk the link chain by hand).
+SELF=$0
+while [ -L "$SELF" ]; do
+  _dir=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd)
+  SELF=$(readlink -- "$SELF")
+  case $SELF in /*) ;; *) SELF=$_dir/$SELF ;; esac
+done
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd)
 CONF=${DEVBOX_CONF:-$SCRIPT_DIR/devbox.conf}
 TEMPLATE=$SCRIPT_DIR/cloud-init.yaml
 

@@ -10,6 +10,7 @@ state file** (DigitalOcean itself is the source of truth). Contract:
 | File | What |
 |---|---|
 | `devbox` | Operator CLI: `up` / `configure` / `ssh` / `status` / `render` / `down`. |
+| `install.sh` | Symlinks `devbox` onto your `PATH` (one-time, so you can run bare `devbox`). |
 | `cloud-init.yaml` | First-boot template: creates the user, hardens SSH, installs the toolchain. |
 | `devbox.conf.example` | Config template — copy to `devbox.conf` (gitignored) and edit. |
 
@@ -20,27 +21,38 @@ state file** (DigitalOcean itself is the source of truth). Contract:
    `SSH_PUBKEY_FILES` to your laptop **and** desktop public keys.
 3. Make sure your private key is loaded in your SSH agent (`ssh-add -l`) — the box
    reuses it via agent forwarding for git; nothing is stored on the box.
+4. One-time: put the CLI on your `PATH` so you can run it as bare `devbox` from
+   anywhere. From the project root:
+
+   ```sh
+   deploy/install.sh
+   ```
+
+   It symlinks `deploy/devbox` into a writable PATH dir (prefers `~/.local/bin`).
+   Safe to re-run; `deploy/install.sh --uninstall` removes it. (The CLI resolves the
+   symlink, so it still reads `deploy/devbox.conf` and `deploy/cloud-init.yaml` from
+   the repo.)
 
 ## Usage
 
 **One command does everything:**
 
 ```sh
-deploy/devbox up         # provision + configure + vault (init/unseal) + load all secrets
+devbox up         # provision + configure + vault (init/unseal) + load all secrets
 ```
 
 `up` is idempotent — run it again any time to re-converge (re-configure, re-unseal a
 rebooted vault, re-load secrets). The rest are for granular control / day-to-day:
 
 ```sh
-deploy/devbox ssh        # connect (agent-forwarded)
-deploy/devbox status     # show the droplet
-deploy/devbox configure  # re-install config only (existing box)
-deploy/devbox render     # print the rendered cloud-init — no API calls (safe to inspect)
-deploy/devbox vault up        # bring the vault to ready (start + init/unseal as needed)
-deploy/devbox vault load myapp # (re)push one project's ~/devbox-secrets/myapp.env
-deploy/devbox vault status    # initialized / sealed?
-deploy/devbox down       # destroy droplet + firewall
+devbox ssh        # connect (agent-forwarded)
+devbox status     # show the droplet
+devbox configure  # re-install config only (existing box)
+devbox render     # print the rendered cloud-init — no API calls (safe to inspect)
+devbox vault up        # bring the vault to ready (start + init/unseal as needed)
+devbox vault load myapp # (re)push one project's ~/devbox-secrets/myapp.env
+devbox vault status    # initialized / sealed?
+devbox down       # destroy droplet + firewall
 ```
 
 ## Secrets — the on-box vault
@@ -67,15 +79,15 @@ tolerated.
 `~/devbox-secrets/*.env`. The individual commands below are only for granular control:
 
 ```sh
-deploy/devbox vault up          # start + init/unseal (same readiness as `up`)
-deploy/devbox vault unseal      # re-unseal after a reboot, from your saved key
-deploy/devbox vault load myapp  # (re)push just one project to secret/myapp
+devbox vault up          # start + init/unseal (same readiness as `up`)
+devbox vault unseal      # re-unseal after a reboot, from your saved key
+devbox vault load myapp  # (re)push just one project to secret/myapp
 ```
 
 If the box reboots, OpenBao **auto-starts (sealed)** via its systemd unit
-(`devbox-vault.service`), so the server is back up and `deploy/devbox vault unseal`
+(`devbox-vault.service`), so the server is back up and `devbox vault unseal`
 reopens it from your saved key (no re-init). If for some reason the server isn't running,
-`deploy/devbox vault up` starts it and unseals in one step. (Server logs:
+`devbox vault up` starts it and unseals in one step. (Server logs:
 `~/.config/devbox/openbao.log` or `journalctl -u devbox-vault`.)
 
 **Auto-seal TTL (optional).** Set `AUTOSEAL_TTL` (e.g. `5min`) in `devbox.conf` and the
