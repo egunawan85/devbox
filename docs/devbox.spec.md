@@ -115,9 +115,22 @@ is a **disposable, session-scoped cache** — its contents die with the box.
   login + forwarded SSH agent, nothing at rest (see [A], [T]).
 - **E7** **Production mode, sealed-on-disk, re-init per box.** OpenBao stores its data
   encrypted on the box's disk; it boots **sealed** and is unsealed per session from the
-  operator's key. Because the box is disposable (no persistent volume), each fresh box
-  is **re-initialized** — it gets a new unseal key + root token, saved to the laptop for
+  operator's key. It runs under a systemd unit so it **auto-starts (sealed) on every
+  boot** — after a reboot the server is up and `vault unseal` reopens it (no re-init).
+  Because the box is disposable (no persistent volume), each fresh box is
+  **re-initialized** — it gets a new unseal key + root token, saved to the laptop for
   that box's life. (Chosen over dev/in-memory mode for a real unlock gate.)
+- **E8** _Optional._ **On-login materialization for file-based apps.** When the operator
+  declares a manifest (vault project → dest `.env` path), each login materializes those
+  secrets into the app's `.env` files **on tmpfs (RAM), never the box's disk**, and they
+  are wiped when the operator's **last** session ends (logind reference-counts sessions —
+  a lingering one, e.g. a VS Code server, keeps them until it too ends). Requires the
+  vault unsealed; cleanup never touches a real file, the operator's store, or the vault.
+- **E9** _Optional._ **Auto-seal TTL.** The vault can be set to **re-seal a fixed time
+  after each unseal** (reset on every unseal), enforced by a systemd timer using a
+  **seal-only** token (capability `sys/seal` only — it can lock the vault but **cannot
+  read any secret**; root stays on the laptop). Re-locks a forgotten-unsealed vault; it
+  does not wipe already-materialized session files (lock-only).
 
 **Runtime exposure (inherent, not removable).** To *use* a secret, its plaintext must
 sit in process memory, where co-resident code on the box (e.g. a malicious dependency)
