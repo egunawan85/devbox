@@ -466,7 +466,12 @@ env_to_json() {
 
 # Start the OpenBao server on the box: prod mode, `file` storage (encrypted at rest),
 # listener bound to 127.0.0.1 only (SSH login is the access gate — E1). Echoes the
-# seal-status JSON (or {"error":...}). Idempotent (no-op if already running).
+# seal-status JSON (or {"error":...}). Idempotent.
+#
+# Runs under a systemd unit (devbox-vault.service) so the vault AUTO-STARTS — sealed —
+# on every boot. That's the fix for the reboot gap: previously `bao server` was nohup'd
+# and died on reboot, so `vault unseal` hit a dead server; now the server is back up
+# (sealed) after a reboot and `vault unseal` reopens it from your laptop key as designed.
 vault_start() {
   local host=$1
   ssh_box "$host" 'true'
@@ -474,11 +479,9 @@ vault_start() {
 set -eu
 umask 077                                   # owner-only files/dirs
 command -v bao >/dev/null 2>&1 || { echo '{"error":"bao not installed"}'; exit 0; }
+me=$(id -un)
 cfgdir="$HOME/.config/devbox"
 mkdir -p "$cfgdir/openbao-data"
-# Serialize concurrent starts. -w fails (instead of hanging) if the lock is stuck.
-exec 9>"$cfgdir/vault.lock"
-flock -w 10 9 || { echo '{"error":"could not acquire vault lock"}'; exit 0; }
 cfg="$cfgdir/openbao.hcl"
 if [ ! -f "$cfg" ]; then
   cat > "$cfg" <<HCL
@@ -493,15 +496,40 @@ disable_mlock = true
 ui            = false
 HCL
 fi
+# Install/refresh the systemd unit (idempotent: only rewrite + reload if changed).
+baobin=$(command -v bao)
+unit=/etc/systemd/system/devbox-vault.service
+want="[Unit]
+Description=devbox OpenBao vault (prod mode, localhost-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$me
+ExecStart=$baobin server -config=$cfg
+Restart=on-failure
+RestartSec=2
+StandardOutput=append:$cfgdir/openbao.log
+StandardError=append:$cfgdir/openbao.log
+
+[Install]
+WantedBy=multi-user.target"
+if [ "$(sudo cat "$unit" 2>/dev/null || true)" != "$want" ]; then
+  printf '%s\n' "$want" | sudo tee "$unit" >/dev/null
+  sudo systemctl daemon-reload
+fi
+sudo systemctl enable devbox-vault >/dev/null 2>&1 || true   # start sealed on every boot
 export BAO_ADDR="http://127.0.0.1:8200"
-# /sys/seal-status answers 200 even when sealed/uninitialized — use it as the up-probe.
-if ! curl -fsS "$BAO_ADDR/v1/sys/seal-status" >/dev/null 2>&1; then
-  # 9>&- closes the lock fd in the child so the long-lived server doesn't hold the
-  # flock for its whole life (which would hang the next 'vault up') — H1.
-  nohup bao server -config="$cfg" >"$cfgdir/openbao.log" 2>&1 9>&- & disown || true
+# Ensure it's running under systemd. If a legacy nohup instance holds the port (older
+# boxes), clear it first so systemd can bind — systemd then owns it across reboots.
+if ! systemctl is-active --quiet devbox-vault; then
+  pkill -f 'bao server' 2>/dev/null || true
+  sleep 1
+  sudo systemctl start devbox-vault || true
   for i in $(seq 1 30); do curl -fsS "$BAO_ADDR/v1/sys/seal-status" >/dev/null 2>&1 && break; sleep 0.5; done
 fi
-curl -fsS "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null || echo '{"error":"server not responding"}'
+curl -fsS "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null \
+  || echo '{"error":"server not responding (check: journalctl -u devbox-vault, or '"$cfgdir"'/openbao.log)"}'
 EOF
 }
 
@@ -589,6 +617,10 @@ vault_unseal() {
   command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
   local host; host=$(vault_host)
   ssh_box "$host" 'true'
+  # The server must be up to accept an unseal. With the systemd unit it auto-starts
+  # (sealed) on boot; if it's somehow down, point at `vault up` instead of a raw curl error.
+  ssh_box "$host" 'curl -fsS --max-time 5 http://127.0.0.1:8200/v1/sys/seal-status >/dev/null 2>&1' \
+    || die "the vault server isn't responding on $host — run '$(basename "$0") vault up' (it starts the server, then unseals)"
   if [ ! -f "$VAULT_KEYS_FILE" ]; then
     # No saved key. If the box's vault is nonetheless initialized, the unseal key was
     # lost (e.g. init's SSH stream dropped before save) → it's unrecoverable (M1).
