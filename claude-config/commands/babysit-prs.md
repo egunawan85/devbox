@@ -110,6 +110,10 @@ run concurrently). Give each agent this self-contained brief:
 >   non-blocking notes, fixes optional; `blocked-with-comments` = do not merge
 >   until addressed).
 > - `reviewed_sha`: the head SHA you reviewed.
+> - `bottom_line`: 2–4 sentences, conclusion-first (BLUF) — mergeable-or-not, the
+>   net security risk in one phrase, and the single most important actionable item
+>   stated as advisory-or-blocking. Write it so the orchestrator can drop it in
+>   verbatim as the lead, without re-deriving it from the detail bullets below.
 > - `summary_match`: 2–4 sentences on summary-vs-code.
 > - `security`: bullet findings (or "no concerns found").
 > - `rereview_notes`: per-prior-concern status (only if this was a re-review).
@@ -134,15 +138,22 @@ Comment body (fill in; keep the marker line last and exact):
 
 **Reviewed:** `<short-sha>` · **Merge conflicts:** <none | ⚠️ CONFLICT — mergeStateStatus=<...>>
 
+> **Bottom line:** <bottom_line — 2–4 sentences, conclusion-first: mergeable-or-not, the net security risk in one phrase, and the single most important actionable item stated as advisory-or-blocking. This leads, before any section below.>
+
 <sub>"Merge conflicts" is a Git mechanical state only — it is **not** a security signal. The security judgment is the verdict above + the findings below.</sub>
 
-### Summary vs. code
+### The one fix to make
+<Only when there is a concrete action: the specific change, where, and a one-line "why." Use "### What to address" if there is more than one. Omit this whole section entirely on a clean pass.>
+
+### Full findings (for the record)
+
+**Summary vs. code**
 <summary_match>
 
-### Security review
+**Security review**
 <security findings, or "No concerns found.">
 
-<### Re-review (pass #<n>)  — only when RE_REVIEW
+<**Re-review (pass #<n>)**  — only when RE_REVIEW
 <per-prior-concern: addressed / partial / open / regressed>>
 
 ---
