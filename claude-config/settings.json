@@ -11,9 +11,13 @@
             "PowerShell",
             "Read"
         ],
+        "deny":
+        [
+            "Bash(cd)",
+            "Bash(cd:*)"
+        ],
         "ask":
         [
-            "Bash(cd:*)",
             "Bash(ssh:*)",
             "Bash(git push:*)",
             "Bash(git pull:*)",
@@ -35,7 +39,6 @@
             "Bash(git cherry-pick:*)",
             "Bash(git clean:*)",
             "Bash(git stash:*)",
-            "PowerShell(cd:*)",
             "PowerShell(Set-Location:*)",
             "PowerShell(ssh:*)",
             "PowerShell(git push:*)",
