@@ -67,15 +67,35 @@ otherwise do work on a repo, follow this workflow:
    inside the worktree: attack the change, find weaknesses,
    verify, and fix what you find before moving on.
 
-7. **External red-team (if needed).**
+7. **External red-team (if needed) — automated and
+   model-diverse.** Run this yourself rather than handing it
+   to me: a full Claude Code instance is more thorough than a
+   constrained sub-agent, and I stay in the loop by reviewing
+   the verdicts on the PR. Run it twice with **different
+   models for genuine independence** (e.g. once Opus, once
+   Sonnet), post each model's verbatim verdict as its own PR
+   comment, then fix and re-verify. For the highest-stakes
+   cases, fall back to a **manual human-run review** instead:
+   open a second worktree and hand me a paste-ready prompt to
+   run myself.
 
-   - Open a **second worktree branched from the current
-     working worktree's state** (not from fresh `main`), so I
-     review exactly what you built.
-   - Give me a ready-to-copy-paste prompt to run the external red-team.
-   - Pause for my external red-team results.
-   - Based on the findings, either finish, or re-iterate
-     (back through internal RT as needed) until clean.
+   **Mechanics that are easy to get wrong:** branch each
+   model off the BUILT state in its own detached worktree
+   (`git worktree add --detach <path> HEAD`) and symlink the
+   gitignored prereqs (`.env`, `node_modules`) so it can
+   build/run/test. Launch one headless session per model in
+   parallel, wrapped in `timeout`, passing `--model`
+   EXPLICITLY (the default headless model may be unavailable),
+   feeding the prompt via STDIN (RT prompts contain
+   backticks/emoji that break shell quoting), and with
+   `--permission-mode acceptEdits` (lets it write scratch
+   fixtures and run tests while git-writes stay gated). The RT
+   prompt must scope the safety properties to attack, a
+   privacy rule (use only committed/invented fixtures, never
+   real data dirs), and a structured deliverable
+   (verdict + findings with severity/file:line/repro/fix).
+   Then triage convergent findings first, fix, re-verify
+   (back through internal RT as needed until clean).
 
 8. **Open the PR (present for review).** Once the code, the
    required red-teams, and any tests are done, push the
@@ -84,10 +104,12 @@ otherwise do work on a repo, follow this workflow:
    never merges. Write the PR body in two registers: first a
    **plain-English summary** of what the committed code does
    (easy to skim), then a **denser, more technical section**
-   for future AI readers. Include the **latest external
-   red-team review verbatim** for my reference. Keep it
-   durable — no references to ephemeral planning docs (see
-   "Write for the long term").
+   for future AI readers. Surface the **external red-team
+   verdicts verbatim** for my reference — as each model's own
+   PR comment for the automated model-diverse flow, or inline
+   in the body for a manual review. Keep it durable — no
+   references to ephemeral planning docs (see "Write for the
+   long term").
 
 9. **Merge gate.** Merging the PR to main — and any push or
    commit OUTSIDE a worktree — still requires my explicit
