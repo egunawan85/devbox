@@ -51,6 +51,7 @@ devbox configure  # re-install config only (existing box)
 devbox render     # print the rendered cloud-init — no API calls (safe to inspect)
 devbox vault up        # bring the vault to ready (start + init/unseal as needed)
 devbox vault load myapp # (re)push one project's ~/devbox-secrets/myapp.env
+devbox vault refresh myapp # load + re-materialize into a live session (no re-login)
 devbox vault status    # initialized / sealed?
 devbox down       # destroy droplet + firewall
 ```
@@ -82,7 +83,16 @@ tolerated.
 devbox vault up          # start + init/unseal (same readiness as `up`)
 devbox vault unseal      # re-unseal after a reboot, from your saved key
 devbox vault load myapp  # (re)push just one project to secret/myapp
+devbox vault refresh myapp  # load myapp (or all, if omitted) + restart the
+                            # session-secrets service so a live SSH session picks
+                            # up the new values without a logout/login
 ```
+
+After editing a `~/devbox-secrets/<proj>.env`, `devbox vault refresh <proj>` pushes
+it to the vault and re-materializes the on-tmpfs `.env` in any active login session
+(it restarts `devbox-secrets.service`). With no active session it just loads the
+vault — the secret materializes on the next login. Omit the project name to refresh
+every project.
 
 If the box reboots, OpenBao **auto-starts (sealed)** via its systemd unit
 (`devbox-vault.service`), so the server is back up and `devbox vault unseal`

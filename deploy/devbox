@@ -17,6 +17,8 @@
 #   devbox vault init         init + unseal a fresh box (saves keys to your laptop)
 #   devbox vault unseal       re-unseal an existing box from your saved key
 #   devbox vault load <proj>  push ~/devbox-secrets/<proj>.env into the box's vault
+#   devbox vault refresh [proj]  load <proj> (or all) + re-materialize into any
+#                               active login session (no logout/login needed)
 #   devbox vault status       initialized / sealed?
 #   devbox down [--yes]       destroy the droplet + firewall
 #
@@ -859,6 +861,36 @@ vault_load() {
   log "loaded. On the box: bao kv get -mount=$VAULT_MOUNT $proj"
 }
 
+# Push local .env(s) into the vault, then re-materialize them on the box for any
+# active login session by restarting the session-secrets user service. With no
+# project, refreshes every ~/devbox-secrets/*.env. The on-box restart is best
+# effort: with no active session there is nothing to re-materialize — secrets
+# land on the next login anyway. This saves a logout/login round-trip when you've
+# edited a .env and want a live session to see the new values.
+vault_refresh() {
+  local proj=${1:-}
+  if [ -n "$proj" ]; then
+    vault_load "$proj"
+  else
+    vault_load_all
+  fi
+  local host; host=$(vault_host)
+  log "re-materializing secrets for any active session on $host"
+  ssh_box "$host" 'bash -s' <<'EOF'
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+# No user manager == no live session; secrets materialize fresh on next login.
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+  echo "devbox-secrets: no active login session — secrets will materialize on next login"
+  exit 0
+fi
+if systemctl --user restart devbox-secrets.service 2>/dev/null; then
+  echo "devbox-secrets: re-materialized for the active session"
+else
+  echo "devbox-secrets: service not installed or restart failed — check 'systemctl --user status devbox-secrets'" >&2
+fi
+EOF
+}
+
 vault_status() {
   local host; host=$(vault_host)
   ssh_box "$host" 'true'
@@ -871,12 +903,13 @@ cmd_vault() {
   load_conf   # sets VAULT_MOUNT / SECRETS_DIR / VAULT_KEYS_FILE defaults
   local action=${1:-}; shift || true
   case "$action" in
-    up)     vault_up ;;
-    init)   vault_init ;;
-    unseal) vault_unseal ;;
-    load)   vault_load "$@" ;;
-    status) vault_status ;;
-    *) die "usage: $(basename "$0") vault up | init | unseal | load <project> | status" ;;
+    up)      vault_up ;;
+    init)    vault_init ;;
+    unseal)  vault_unseal ;;
+    load)    vault_load "$@" ;;
+    refresh) vault_refresh "$@" ;;
+    status)  vault_status ;;
+    *) die "usage: $(basename "$0") vault up | init | unseal | load <project> | refresh [project] | status" ;;
   esac
 }
 
