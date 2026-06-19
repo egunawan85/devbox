@@ -14,7 +14,10 @@
         "deny":
         [
             "Bash(cd)",
-            "Bash(cd:*)"
+            "Bash(cd /*)",
+            "Bash(cd ~*)",
+            "Bash(cd ..*)",
+            "Bash(cd -*)"
         ],
         "ask":
         [
