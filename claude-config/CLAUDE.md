@@ -64,11 +64,14 @@ otherwise do work on a repo, follow this workflow:
 
 7. **Approval gate.** When the work is ready, present it for
    my review and ask for explicit approval **before** you
-   commit, merge, and push. Never commit / merge / push
-   without my go-ahead. (Note: git push/pull/merge/commit and
-   other
-   write ops are also gated by the permission rules in
-   settings.json.)
+   merge and push. Commits INSIDE a worktree are pre-approved
+   (isolated, reversible local branch) — you may commit there
+   as you work without asking. Merge, push, and any commit
+   OUTSIDE a worktree still require my explicit go-ahead.
+   (Note: these rules are also enforced by the git-write-guard
+   hook and the permission rules in settings.json — add/commit
+   auto-allow inside `.claude/worktrees/`; everything else
+   gated.)
 
 ## Shell command style
 
