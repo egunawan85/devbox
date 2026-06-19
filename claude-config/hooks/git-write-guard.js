@@ -11,9 +11,10 @@
 // permission flow).
 //
 // Exception: when cwd is inside a worktree under .claude/worktrees/ AND the command's
-// only git write ops are add/commit (no wrapper, no other write op), it emits "allow"
-// instead — a worktree is an isolated local branch, so committing there can't touch
-// main or reach the remote. Any mixed/gated/wrapped command still asks.
+// only git write ops are add/commit/push (no wrapper, no other write op), it emits
+// "allow" instead — a worktree is an isolated feature branch, so committing there can't
+// touch main, and pushing it just publishes that branch for PR review (never a merge).
+// A push that targets main/master still asks, as does any mixed/gated/wrapped command.
 //
 // One cross-OS implementation: run via `node` on Linux, Windows, and macOS.
 
@@ -28,9 +29,15 @@ const WRITE_SUBS = new Set([
 ]);
 
 // Write subcommands that are pre-approved when cwd is inside a git worktree under
-// .claude/worktrees/ — a worktree is on its own isolated branch, so add/commit
-// there can't touch main and can't reach the remote.
-const WORKTREE_OK = new Set(['add', 'commit']);
+// .claude/worktrees/ — a worktree is on its own isolated feature branch, so add/commit
+// there can't touch main, and pushing that branch only publishes it for PR review.
+const WORKTREE_OK = new Set(['add', 'commit', 'push']);
+
+// A push that names main/master as a target bypasses the merge-to-main gate, so it must
+// always ask — even from inside a worktree. Matches `... main`, `... master`, `:main`,
+// `HEAD:master`, etc. False positives (e.g. a branch literally named main-fix) only cost
+// a spurious prompt, never a missed gate.
+const PUSH_TO_MAIN = /\bpush\b[\s\S]*?(?::|\s)(?:HEAD:)?(?:main|master)\b/i;
 
 // git global options that consume a following separate argument.
 const OPT_WITH_ARG = new Set([
@@ -155,7 +162,8 @@ function main() {
   // detected write op is add/commit. Otherwise fail closed to "ask".
   const onlyWorktreeOps = !wrapperSub && subs.length > 0 &&
                           subs.every((s) => WORKTREE_OK.has(s));
-  if (inWorktree && onlyWorktreeOps) allow(subs.join('+'));
+  const pushesToMain = subs.includes('push') && PUSH_TO_MAIN.test(cmd);
+  if (inWorktree && onlyWorktreeOps && !pushesToMain) allow(subs.join('+'));
   else ask(gated[0]);
 }
 

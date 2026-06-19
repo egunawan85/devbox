@@ -7,12 +7,20 @@ These apply to every project unless a project's own CLAUDE.md or my explicit ins
 When I ask you to add a feature, implement a fix, or
 otherwise do work on a repo, follow this workflow:
 
-1. **Worktree-first.** Do the work in a dedicated git
+1. **Surface design decisions up front.** Before diving in,
+   lay out the key design decisions for the task so I can
+   review and align with you — and so automation can then run
+   as long as possible without stopping. If you sense
+   decisions exist but can't name them, spike to surface them.
+   Resolve what you can with sensible defaults (note them);
+   raise only the ones that genuinely need my input.
+
+2. **Worktree-first.** Do the work in a dedicated git
    worktree (via EnterWorktree / `--worktree` / agent
    isolation),
    not the main checkout. One worktree per task.
 
-2. **Maximize automation.** Drive the task to completion as
+3. **Maximize automation.** Drive the task to completion as
    autonomously as possible — plan, edit, build, run tests.
    Only stop to ask me when there is an _important_ question: ambiguous requirements, irreversible or destructive
    actions, security/architecture trade-offs, or anything
@@ -20,7 +28,7 @@ otherwise do work on a repo, follow this workflow:
    choices — pick a sensible default, note it, and keep
    going.
 
-3. **Verify before presenting (build + tests).** Before any
+4. **Verify before presenting (build + tests).** Before any
    approval gate, **build the solution and build the test
    projects**, and **run the relevant test suites**. State
    explicitly what you ran and the outcome —
@@ -32,7 +40,14 @@ otherwise do work on a repo, follow this workflow:
    that
    it looks correct.
 
-4. **Decide on red-team review.** When the implementation is
+   - **Writing new tests is conditional.** Always _run_ the
+     existing suite (above). For _authoring_ new tests: when a
+     design decision is settled, write its tests as part of
+     the work. When the design is still exploratory, hold off
+     rather than locking tests against a design that may
+     change — note that tests are pending, or ask me.
+
+5. **Decide on red-team review.** When the implementation is
    complete, explicitly decide whether the change warrants:
 
    - an **internal red-team** — you adversarially
@@ -48,11 +63,11 @@ otherwise do work on a repo, follow this workflow:
      auth,
      crypto, data integrity, or other high-risk surfaces.
 
-5. **Internal red-team (if needed).** Perform it yourself
+6. **Internal red-team (if needed).** Perform it yourself
    inside the worktree: attack the change, find weaknesses,
    verify, and fix what you find before moving on.
 
-6. **External red-team (if needed).**
+7. **External red-team (if needed).**
 
    - Open a **second worktree branched from the current
      working worktree's state** (not from fresh `main`), so I
@@ -62,25 +77,33 @@ otherwise do work on a repo, follow this workflow:
    - Based on the findings, either finish, or re-iterate
      (back through internal RT as needed) until clean.
 
-7. **Approval gate.** When the work is ready, present it for
-   my review and ask for explicit approval **before** you
-   merge and push. Commits INSIDE a worktree are pre-approved
-   (isolated, reversible local branch) — you may commit there
-   as you work without asking. Merge, push, and any commit
-   OUTSIDE a worktree still require my explicit go-ahead.
-   (Note: these rules are also enforced by the git-write-guard
-   hook and the permission rules in settings.json — add/commit
-   auto-allow inside `.claude/worktrees/`; everything else
-   gated.)
+8. **Open the PR (present for review).** Once the code, the
+   required red-teams, and any tests are done, push the
+   worktree's branch and open a PR for my review. This is
+   pre-approved — it pushes an isolated feature branch and
+   never merges. Write the PR body in two registers: first a
+   **plain-English summary** of what the committed code does
+   (easy to skim), then a **denser, more technical section**
+   for future AI readers. Include the **latest external
+   red-team review verbatim** for my reference. Keep it
+   durable — no references to ephemeral planning docs (see
+   "Write for the long term").
 
-## Shell command style
+9. **Merge gate.** Merging the PR to main — and any push or
+   commit OUTSIDE a worktree — still requires my explicit
+   go-ahead. Commits and branch pushes INSIDE a worktree are
+   pre-approved (isolated, reversible local branch); you may
+   work and push the branch there without asking. (These rules
+   are also enforced by the git-write-guard hook and
+   settings.json: add/commit and branch push auto-allow inside
+   `.claude/worktrees/`; merge, push-to-main, and everything
+   else gated.)
 
-- **Never prefix commands with `cd`** — no `cd <dir> &&
-<command>` (Bash) and no `cd <dir>; <command>`
-  (PowerShell). Instead, use absolute paths in the command's
-  own arguments, tool-native directory flags
-  (`git -C <dir>`, `npm --prefix <dir>`, `dotnet build
-<path-to-proj>`), or run the tool with its working
-  directory already set. The compound form defeats
-  prefix-based permission matching and trips a `cd` prompt
-  every time.
+## Write for the long term
+
+Code, comments, commit messages, and PRs outlive the plan
+that produced them. Don't reference ephemeral planning
+artifacts — slices, tasks, phase names, "slice 0", plan-doc
+filenames — in anything committed or in a PR. Describe the
+change by what it does and why, so it still reads correctly
+long after the plan docs are gone.
