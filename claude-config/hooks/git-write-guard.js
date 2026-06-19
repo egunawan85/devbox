@@ -98,8 +98,26 @@ function main() {
   }
   if (!cmd.trim()) process.exit(0);
 
+  // Split on shell operators ( && || ; | newline ) and PowerShell block /
+  // subexpression delimiters ( { } ( ) ) so wrapped commands like
+  // `if ($?) { git push }` or `$(git push)` still surface their git segment.
+  // Over-splitting inside quoted strings is acceptable: worst case is a spurious
+  // "ask", never a missed gate.
+  const segments = cmd.split(/&&|\|\||[;|\n{}()]/);
+
   // True when the command runs from inside a git worktree under .claude/worktrees/.
-  const inWorktree = /\/\.claude\/worktrees\//.test(cwd);
+  // The session cwd is the primary signal, but a session that drives a worktree from
+  // the main checkout reaches it with a `cd` inside the command instead — so also honor
+  // a cd into a worktree. Trust the cd only when EVERY cd in the command targets a path
+  // under .claude/worktrees/; a later `cd` that escapes back out fails closed to ask.
+  const cdTargets = [];
+  for (const seg of segments) {
+    const m = /^\s*cd\s+(?:"([^"]*)"|'([^']*)'|(\S+))/.exec(seg.trim());
+    if (m) cdTargets.push(m[1] ?? m[2] ?? m[3] ?? '');
+  }
+  const cdIntoWorktree = cdTargets.length > 0 &&
+                         cdTargets.every((p) => /\.claude\/worktrees\//.test(p));
+  const inWorktree = /\/\.claude\/worktrees\//.test(cwd) || cdIntoWorktree;
 
   const ask = (sub) => {
     process.stdout.write(JSON.stringify({
@@ -125,12 +143,6 @@ function main() {
     process.exit(0);
   };
 
-  // Split on shell operators ( && || ; | newline ) and PowerShell block /
-  // subexpression delimiters ( { } ( ) ) so wrapped commands like
-  // `if ($?) { git push }` or `$(git push)` still surface their git segment.
-  // Over-splitting inside quoted strings is acceptable: worst case is a spurious
-  // "ask", never a missed gate.
-  const segments = cmd.split(/&&|\|\||[;|\n{}()]/);
   const subs = [];
   for (const seg of segments) {
     const sub = gitSubcommand(seg);
