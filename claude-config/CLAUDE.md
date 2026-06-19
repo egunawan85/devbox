@@ -116,6 +116,18 @@ filenames — in anything committed or in a PR. Describe the
 change by what it does and why, so it still reads correctly
 long after the plan docs are gone.
 
+## Scratch work
+
+All scratch, verification, and throwaway files go in `./tmp/`
+within the current project or worktree — never `/tmp`,
+`/var/tmp`, or any other out-of-tree path. Because each
+worktree is its own checkout, `./tmp/` lives inside that
+checkout and is naturally isolated per task, so parallel work
+never collides and nothing leaks into the main tree. Create
+`./tmp/` if it doesn't already exist, and make sure `/tmp/`
+is gitignored at the project root so scratch is never
+committed.
+
 ## External red-team mechanics
 
 The easy-to-get-wrong details behind step 7. Skip unless

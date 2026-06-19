@@ -13,6 +13,10 @@ deploy/secrets.map
 # Local Claude session overrides.
 .claude/settings.local.json
 
+# In-tree scratch space for agents (verification / throwaway files).
+# Scratch goes in ./tmp/, never /tmp or /var/tmp — see claude-config/CLAUDE.md.
+/tmp/
+
 # Misc
 *.log
 .DS_Store

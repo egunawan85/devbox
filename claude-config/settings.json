@@ -16,6 +16,10 @@
         ],
         "deny":
         [
+            "Write(/tmp/**)",
+            "Edit(/tmp/**)",
+            "Write(/var/tmp/**)",
+            "Edit(/var/tmp/**)",
             "Bash(cd)",
             "Bash(cd /*)",
             "Bash(cd ~*)",
