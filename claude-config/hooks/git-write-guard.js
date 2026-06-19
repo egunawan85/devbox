@@ -45,16 +45,45 @@ const OPT_WITH_ARG = new Set([
   '--config-env', '--super-prefix',
 ]);
 
-// Resolve the git subcommand a single command segment runs, or null if it isn't git.
-function gitSubcommand(segment) {
+// Shell wrappers whose argument payload is another command — a bypass vector when the
+// payload is a git write (sh -c 'git push', eval 'git ...', xargs git ...). A wrapper
+// only counts when it is itself in COMMAND POSITION (the executable of a command
+// segment), never as a file argument or a word inside prose/commit text.
+const WRAPPER_CMDS = new Set([
+  'sh', 'bash', 'zsh', 'dash', 'ksh', 'pwsh', 'powershell', 'eval', 'xargs',
+]);
+
+// Commands that run another command supplied as their trailing arguments. They sit in
+// command position themselves but the real executable (possibly a wrapper) follows them,
+// so a wrapper hidden behind one must still be caught.
+const EXEC_PREFIX = new Set([
+  'env', 'exec', 'command', 'sudo', 'doas', 'su', 'nohup', 'nice', 'setsid',
+  'stdbuf', 'time', 'timeout', 'watch', 'ssh',
+]);
+
+// Reduce a command segment to [leaf, rest]: the lowercased basename of its executable and
+// the remaining argument string, after stripping leading noise (env-var assignments,
+// redirections, and the PowerShell call / dot-source operators). Returns [null, ''] when
+// the segment is empty. This is the segment's COMMAND POSITION — the only place a real
+// executable appears.
+function execHead(segment) {
   let s = segment.trim();
-  if (s === '') return null;
+  if (s === '') return [null, ''];
   let m;
-  // strip leading env-var assignments: FOO=bar BAZ="/a b" git ...
-  // (value may be quoted and contain spaces).
-  while ((m = /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+(.*)$/.exec(s))) s = m[1].trim();
-  // strip PowerShell call / dot-source operators: & git ..., &"git" ..., . git ...
-  while ((m = /^&\s*(.*)$/.exec(s)) || (m = /^\.\s+(.*)$/.exec(s))) s = m[1].trim();
+  // Strip every kind of leading "noise" that can precede the real executable, to a
+  // fixpoint so interleavings (`FOO=bar 2>/dev/null sh ...`) fully resolve. Otherwise a
+  // wrapper hidden behind a redirect (`>log sh -c 'git push'`) would read as the segment's
+  // executable and slip the command-position check.
+  let prev;
+  do {
+    prev = s;
+    // env-var assignments: FOO=bar BAZ="/a b" git ... (value may be quoted, contain spaces).
+    while ((m = /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+(.*)$/.exec(s))) s = m[1].trim();
+    // redirections: >f  >>f  2>f  2>>f  <f  <<<f  &>f  2>&1  (optional fd, optional target).
+    while ((m = /^\d*(?:>>|<<<|<<|>&|<&|>|<)\s*(?:"[^"]*"|'[^']*'|&?[^\s;&|<>]+)?\s+(.*)$/.exec(s))) s = m[1].trim();
+    // PowerShell call / dot-source operators: & git ..., &"git" ..., . git ...
+    while ((m = /^&\s*(.*)$/.exec(s)) || (m = /^\.\s+(.*)$/.exec(s))) s = m[1].trim();
+  } while (s !== prev);
   // extract the executable: quoted (may contain spaces) or first bare token
   let exe = null, rest = '';
   if ((m = /^"([^"]+)"\s*(.*)$/.exec(s)) || (m = /^'([^']+)'\s*(.*)$/.exec(s))) {
@@ -62,8 +91,34 @@ function gitSubcommand(segment) {
   } else if ((m = /^(\S+)\s*(.*)$/.exec(s))) {
     exe = m[1]; rest = m[2];
   }
-  if (!exe) return null;
-  const leaf = exe.split(/[\\/]/).pop().toLowerCase();
+  if (!exe) return [null, ''];
+  return [exe.split(/[\\/]/).pop().toLowerCase(), rest];
+}
+
+// Strip surrounding quotes and any path prefix from a token, then lowercase it — the form
+// in which a wrapper executable would appear as a bare token (e.g. "'/bin/sh'" -> "sh").
+function tokenLeaf(token) {
+  return token.replace(/^['"]+|['"]+$/g, '').split(/[\\/]/).pop().toLowerCase();
+}
+
+// True when a segment runs a shell/eval/xargs wrapper in command position — either as the
+// segment's own executable, or behind a transparent exec-prefix (sudo/env/timeout/...),
+// whose options/values we can't reliably skip, so we scan that segment's tokens for a
+// wrapper. Whole-token matching means a `.sh` filename or the word "sh" mid-argument never
+// trips it; only a wrapper that is itself a command does.
+function segmentHasWrapper(segment) {
+  const [leaf] = execHead(segment);
+  if (leaf === null) return false;
+  if (WRAPPER_CMDS.has(leaf)) return true;
+  if (EXEC_PREFIX.has(leaf)) {
+    return segment.split(/\s+/).filter(Boolean).some((t) => WRAPPER_CMDS.has(tokenLeaf(t)));
+  }
+  return false;
+}
+
+// Resolve the git subcommand a single command segment runs, or null if it isn't git.
+function gitSubcommand(segment) {
+  const [leaf, rest] = execHead(segment);
   if (leaf !== 'git' && leaf !== 'git.exe') return null;
   const tokens = rest.split(/\s+/).filter(Boolean);
   let i = 0;
@@ -99,11 +154,11 @@ function main() {
   if (!cmd.trim()) process.exit(0);
 
   // Split on shell operators ( && || ; | newline ) and PowerShell block /
-  // subexpression delimiters ( { } ( ) ) so wrapped commands like
-  // `if ($?) { git push }` or `$(git push)` still surface their git segment.
-  // Over-splitting inside quoted strings is acceptable: worst case is a spurious
-  // "ask", never a missed gate.
-  const segments = cmd.split(/&&|\|\||[;|\n{}()]/);
+  // subexpression delimiters ( { } ( ) ) and backtick command substitution so wrapped
+  // commands like `if ($?) { git push }`, `$(git push)`, or `` `sh -c 'git push'` ``
+  // still surface their inner segment. Over-splitting inside quoted strings is
+  // acceptable: worst case is a spurious "ask", never a missed gate.
+  const segments = cmd.split(/&&|\|\||[;|\n{}()`]/);
 
   // True when the command runs from inside a git worktree under .claude/worktrees/.
   // The session cwd is the primary signal, but a session that drives a worktree from
@@ -151,14 +206,16 @@ function main() {
 
   // Wrapper fallback (defends against bypasses where git isn't the segment's leaf):
   //   sh -c 'git push' · bash -c "git push" · eval 'git push' · xargs git push
-  // Precisely parsing the nested payload is fragile across quoting, so bias toward a
-  // (safe) ask: if a known wrapper appears AND a `git <write-subcommand>` sequence is
-  // present anywhere, gate it. False positives only cost a spurious prompt.
-  const WRAPPER = /\b(?:sh|bash|zsh|dash|ksh|pwsh|powershell|eval|xargs)\b/i;
+  // The wrapper must be in COMMAND POSITION (a segment's executable, or behind a
+  // transparent exec-prefix) — matching the bare word anywhere would fire on a `.sh`
+  // filename or commit-message prose. Precisely parsing the nested payload is fragile
+  // across quoting, so once a real wrapper is present we bias toward a (safe) ask: if a
+  // `git <write-subcommand>` sequence appears anywhere, gate it. False positives only
+  // cost a spurious prompt.
   const writeAlt = [...WRITE_SUBS].join('|');
   const GIT_WRITE = new RegExp(`\\bgit\\b[\\s\\S]{0,40}?\\b(${writeAlt})\\b`);
   let wrapperSub = null;
-  if (WRAPPER.test(cmd)) {
+  if (segments.some(segmentHasWrapper)) {
     const m = GIT_WRITE.exec(cmd);
     if (m) wrapperSub = m[1].toLowerCase();
   }
