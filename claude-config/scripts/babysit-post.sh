@@ -1,29 +1,25 @@
 #!/usr/bin/env bash
-# babysit-post.sh — the deterministic back half of /babysit-prs (Step 6).
+# babysit-post.sh — the deterministic back half of /babysit-prs.
 #
-# Takes one subagent's structured verdict and publishes it, re-deriving the
+# Takes one red-team review (free-form prose ending in a `VERDICT:` line, as
+# produced by babysit-review.sh / claude -p) and publishes it, re-deriving the
 # world from GitHub so it is correct no matter how stale the caller's view is:
+#   - parse the trailing VERDICT line (drives the label + report row)
 #   - re-fetch the head SHA and STALE-GUARD against the reviewed SHA
 #   - re-fetch mergeStateStatus for the conflict line
 #   - recompute the pass number from the newest prior marker
-#   - render the verdict comment + post it + swap the redteam:* label
+#   - render a small verdict header + the review prose verbatim, post it,
+#     and swap the redteam:* label
 #
 # Usage:
-#   babysit-post.sh <PR> <verdict.json>
+#   babysit-post.sh <PR> <reviewed_sha> <review-file>
 #
-# <verdict.json> is exactly what the red-team subagent returns (see
-# redteam-brief.md):
-#   {
-#     "verdict": "pass|pass-with-comments|blocked-with-comments",
-#     "reviewed_sha": "<full sha the agent reviewed>",
-#     "bottom_line": "...",
-#     "summary_match": "...",
-#     "security": "markdown bullets, or 'No concerns found.'",
-#     "fixes": ["...", ...],            # [] => omit the fix section (clean pass)
-#     "rereview_notes": "..."           # "" / absent unless this was a re-review
-#   }
+# <review-file> is the prose the review session wrote. Its LAST line matching
+#   VERDICT: <pass|pass-with-comments|blocked-with-comments>
+# sets the verdict; that line is stripped from the posted body. Everything else
+# is posted as-is.
 #
-# Prints ONE report row to stdout for Step 7:
+# Prints ONE report row to stdout for the final report:
 #   PR <N> | <class> | <verdict> | <none|CONFLICT> | <posted|STALE (discarded)>
 set -euo pipefail
 
@@ -32,18 +28,29 @@ MARKER_PREFIX='<!-- runegate-redteam'
 command -v gh >/dev/null 2>&1 || { echo "babysit-post: 'gh' not found on PATH" >&2; exit 127; }
 command -v jq >/dev/null 2>&1 || { echo "babysit-post: 'jq' not found on PATH" >&2; exit 127; }
 
-PR="${1:?usage: babysit-post.sh <PR> <verdict.json>}"
-VERDICT_FILE="${2:?usage: babysit-post.sh <PR> <verdict.json>}"
-[[ -r "$VERDICT_FILE" ]] || { echo "babysit-post: cannot read $VERDICT_FILE" >&2; exit 2; }
+PR="${1:?usage: babysit-post.sh <PR> <reviewed_sha> <review-file>}"
+reviewed_sha="${2:?usage: babysit-post.sh <PR> <reviewed_sha> <review-file>}"
+REVIEW_FILE="${3:?usage: babysit-post.sh <PR> <reviewed_sha> <review-file>}"
+[[ -r "$REVIEW_FILE" ]] || { echo "babysit-post: cannot read $REVIEW_FILE" >&2; exit 2; }
 
-v() { jq -r "$1 // \"\"" "$VERDICT_FILE"; }
-
-verdict=$(v '.verdict')
-reviewed_sha=$(v '.reviewed_sha')
+# --- parse the verdict from the trailing VERDICT line --------------------------
+# Take the LAST VERDICT: line; leftmost-longest match picks the full keyword
+# even though "pass" is a prefix of "pass-with-comments".
+verdict=$(grep -iE '^[[:space:]]*VERDICT:' "$REVIEW_FILE" | tail -n1 \
+  | tr -d '`' | tr 'A-Z' 'a-z' \
+  | grep -oE 'pass-with-comments|blocked-with-comments|pass' | head -n1 || true)
 case "$verdict" in
   pass|pass-with-comments|blocked-with-comments) ;;
-  *) echo "babysit-post: bad verdict '$verdict' in $VERDICT_FILE" >&2; exit 2;;
+  *) echo "babysit-post: no valid VERDICT line in $REVIEW_FILE" >&2; exit 2;;
 esac
+
+# Body = the review prose with the VERDICT line(s) removed and trailing blank
+# lines trimmed. One awk pass (portable on BSD/macOS + GNU; always exits 0).
+body=$(awk '
+  tolower($0) ~ /^[[:space:]]*verdict:/ { next }
+  { l[++n] = $0 }
+  END { e = n; while (e > 0 && l[e] ~ /^[ \t]*$/) e--; for (i = 1; i <= e; i++) print l[i] }
+' "$REVIEW_FILE")
 
 # --- newest prior marker (for class + pass number) -----------------------------
 marker=$(gh pr view "$PR" --json comments --jq '
@@ -80,27 +87,6 @@ case "$verdict" in
   blocked-with-comments)  verdict_title="BLOCKED WITH COMMENTS";;
 esac
 
-# --- fix section: 0 => omit, 1 => "the one fix", >1 => "what to address" --------
-fix_count=$(jq '.fixes | if . == null then 0 else length end' "$VERDICT_FILE")
-fix_section=""
-if [[ "$fix_count" == "1" ]]; then
-  fix_section=$'### The one fix to make\n'"$(jq -r '.fixes[0]' "$VERDICT_FILE")"$'\n'
-elif [[ "$fix_count" -gt 1 ]]; then
-  fix_section=$'### What to address\n'"$(jq -r '.fixes[] | "- " + .' "$VERDICT_FILE")"$'\n'
-fi
-
-# --- re-review section (only when a prior marker existed) ----------------------
-rereview_notes=$(v '.rereview_notes')
-rereview_section=""
-if [[ "$class" == "RE_REVIEW" && -n "$rereview_notes" ]]; then
-  rereview_section=$'\n**Re-review (pass #'"$pass"$')**\n'"$rereview_notes"$'\n'
-fi
-
-bottom_line=$(v '.bottom_line')
-summary_match=$(v '.summary_match')
-security=$(v '.security')
-[[ -z "$security" ]] && security="No concerns found."
-
 # --- render + post -------------------------------------------------------------
 body_file=$(mktemp)
 trap 'rm -f "$body_file"' EXIT
@@ -109,19 +95,10 @@ cat >"$body_file" <<EOF
 
 **Reviewed:** \`${reviewed_sha:0:7}\` · **Merge conflicts:** ${conflicts}
 
-> **Bottom line:** ${bottom_line}
-
 <sub>"Merge conflicts" is a Git mechanical state only — it is **not** a security signal. The security judgment is the verdict above + the findings below.</sub>
 
-${fix_section}
-### Full findings (for the record)
+${body}
 
-**Summary vs. code**
-${summary_match}
-
-**Security review**
-${security}
-${rereview_section}
 ---
 <sub>Automated red-team pass #${pass}. **Not a merge approval** — the merge decision is manual. Reply or push fixes and the next sweep will re-review.</sub>
 <!-- runegate-redteam sha=${reviewed_sha} verdict=${verdict} pass=${pass} -->
