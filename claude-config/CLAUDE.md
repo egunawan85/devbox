@@ -79,23 +79,9 @@ otherwise do work on a repo, follow this workflow:
    open a second worktree and hand me a paste-ready prompt to
    run myself.
 
-   **Mechanics that are easy to get wrong:** branch each
-   model off the BUILT state in its own detached worktree
-   (`git worktree add --detach <path> HEAD`) and symlink the
-   gitignored prereqs (`.env`, `node_modules`) so it can
-   build/run/test. Launch one headless session per model in
-   parallel, wrapped in `timeout`, passing `--model`
-   EXPLICITLY (the default headless model may be unavailable),
-   feeding the prompt via STDIN (RT prompts contain
-   backticks/emoji that break shell quoting), and with
-   `--permission-mode acceptEdits` (lets it write scratch
-   fixtures and run tests while git-writes stay gated). The RT
-   prompt must scope the safety properties to attack, a
-   privacy rule (use only committed/invented fixtures, never
-   real data dirs), and a structured deliverable
-   (verdict + findings with severity/file:line/repro/fix).
-   Then triage convergent findings first, fix, re-verify
-   (back through internal RT as needed until clean).
+   The setup is easy to get wrong — see **External red-team
+   mechanics** at the bottom for the worktree, prereq-symlink,
+   headless-launch, and prompt details.
 
 8. **Open the PR (present for review).** Once the code, the
    required red-teams, and any tests are done, push the
@@ -129,3 +115,41 @@ artifacts — slices, tasks, phase names, "slice 0", plan-doc
 filenames — in anything committed or in a PR. Describe the
 change by what it does and why, so it still reads correctly
 long after the plan docs are gone.
+
+## External red-team mechanics
+
+The easy-to-get-wrong details behind step 7. Skip unless
+you're wiring up the automated run.
+
+- **Branch off the BUILT state.** Each model gets its own
+  detached worktree off the current build:
+  `git worktree add --detach <path> HEAD`.
+
+- **Symlink prereqs, then protect them.** Symlink the
+  gitignored prereqs (`.env`, `node_modules`) so the worktree
+  can build/run/test. Then append each prereq's BARE name (no
+  trailing slash) to the git exclude so the pre-approved
+  `git add`/commit can't sweep them in — repos usually ignore
+  these with trailing-slash patterns (`node_modules/`) that
+  match dirs but NOT the symlinks git treats as files. Linked
+  worktrees read excludes from the shared common dir, so write
+  to
+  `"$(git -C <worktree> rev-parse --git-common-dir)/info/exclude"`
+  (resolves to the main repo's `.git/info/exclude`), not a
+  per-worktree exclude file — and dedup before appending
+  (`grep -qxF`).
+
+- **Launch headless, one session per model, in parallel.**
+  Wrap in `timeout`; pass `--model` EXPLICITLY (the default
+  headless model may be unavailable); feed the prompt via
+  STDIN (RT prompts contain backticks/emoji that break shell
+  quoting); use `--permission-mode acceptEdits` (lets it write
+  scratch fixtures and run tests while git-writes stay gated).
+
+- **Prompt contents.** Scope the safety properties to attack,
+  a privacy rule (use only committed/invented fixtures, never
+  real data dirs), and a structured deliverable (verdict +
+  findings with severity/file:line/repro/fix).
+
+- **Triage.** Convergent findings first, fix, re-verify (back
+  through internal RT as needed until clean).

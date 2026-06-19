@@ -10,7 +10,9 @@
         [
             "Bash",
             "PowerShell",
-            "Read"
+            "Read",
+            "Edit(//**/.git/info/exclude)",
+            "Write(//**/.git/info/exclude)"
         ],
         "deny":
         [
