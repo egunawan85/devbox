@@ -1,179 +1,66 @@
 ---
 description: One idempotent red-team sweep over open PRs — review, post verdict comment, label. Never merges.
 argument-hint: '[PR number]  (optional — review just that PR, ignoring quiet-period & cap)'
-allowed-tools: Bash(gh:*), Bash(git:*), Agent, Read, Grep
+allowed-tools: Bash(~/.claude/scripts/babysit-plan.sh:*), Bash(~/.claude/scripts/babysit-post.sh:*), Bash(gh:*), Bash(git:*), Agent, Read
 ---
 
-# /babysit-prs — single red-team sweep
+# /babysit-prs — single red-team sweep (dispatcher)
 
-You are running **one pass** of the PR red-team loop for this repo. This whole
-command is designed to be safe to run repeatedly: **all state lives in GitHub**
-(PR head SHA, your prior verdict comments, labels), so every pass re-derives the
-world from scratch. There is no local state file to drift.
+You run **one pass** of the PR red-team loop. It is safe to run repeatedly: all
+state lives in GitHub (PR head SHA, your prior verdict comments, labels), so every
+pass re-derives the world from scratch — there is no local state.
 
-## Tunables (edit these constants here, not the logic below)
+The deterministic plumbing lives in two scripts so your attention stays on
+dispatching reviews, not on emulating shell:
 
-- `MAX_PRS_PER_PASS = 3` — also the max parallel reviews per pass.
-- `QUIET_PERIOD_MINUTES = 5` — skip a PR pushed more recently than this; let it settle.
-- `TARGET_BRANCH = main` — only review PRs whose base is this branch.
-- Verdict labels: `redteam:pass`, `redteam:pass-with-comments`, `redteam:blocked-with-comments`.
-- Marker format (hidden HTML comment, one per verdict comment):
-  `<!-- runegate-redteam sha=<HEADSHA> verdict=<pass|pass-with-comments|blocked-with-comments> pass=<N> -->`
+- `~/.claude/scripts/babysit-plan.sh` — labels, enumerate, skip logic, classify,
+  sort, cap. Tunables (`MAX_PRS_PER_PASS`, `QUIET_PERIOD_MINUTES`, `TARGET_BRANCH`,
+  marker format) are constants **inside that script** — edit them there.
+- `~/.claude/scripts/babysit-post.sh` — stale-guard, render the verdict comment,
+  post it, swap the `redteam:*` label, print one report row.
 
-## Argument
+The red-team rubric is `~/.claude/scripts/redteam-brief.md`; the review subagents
+read it themselves, so it is not inlined here.
 
-- `$ARGUMENTS` — if a PR number is given, review **only** that PR and **ignore**
-  the quiet-period and the per-pass cap (a forced single-PR review). Otherwise do
-  a full sweep.
+## Step 1 — Plan
 
----
+Run `~/.claude/scripts/babysit-plan.sh $ARGUMENTS` (pass the PR number through if
+given). It prints `{ "selected": [...], "deferred": [...] }`. If `selected` is
+empty, report "nothing eligible this pass" (mention any `deferred`) and stop.
 
-## Step 1 — Ensure labels exist (idempotent)
+Each selected item has: `number`, `title`, `class` (`FIRST_REVIEW`|`RE_REVIEW`),
+`head_sha`, `merge_state`, `prior_sha`, `prior_verdict`, `pass`.
 
-Run once, ignore "already exists" errors:
+## Step 2 — Review each selected PR (parallel subagents)
 
-```
-gh label create "redteam:pass"                 --color 0E8A16 --description "Red-team sweep: no concerns" 2>/dev/null || true
-gh label create "redteam:pass-with-comments"   --color FBCA04 --description "Red-team sweep: advisory comments posted, fixes optional — mergeable" 2>/dev/null || true
-gh label create "redteam:blocked-with-comments" --color B60205 --description "Red-team sweep: do not merge until addressed" 2>/dev/null || true
-```
+Spawn one subagent per selected PR, **all in a single message** so they run
+concurrently. Give each this brief (fill in the per-PR values from the item):
 
-## Step 2 — Enumerate candidate PRs
+> Red-team PR #`<number>` of the Runegate repo.
+> Parameters: `class=<class>`. If `RE_REVIEW`, also `prior_sha=<prior_sha>`,
+> `prior_verdict=<prior_verdict>`.
+> Read `~/.claude/scripts/redteam-brief.md` and follow it exactly. Write your
+> verdict JSON to `<out>`, where `<out>` is a fresh temp path you create
+> (e.g. `mktemp`). Return that path as your final message.
 
-```
-gh pr list --state open --base main --limit 50 \
-  --json number,title,headRefName,headRefOid,isDraft,mergeable,mergeStateStatus,updatedAt,labels,body
-```
+Do **not** re-derive the rubric or the output schema here — the brief owns both.
 
-If `$ARGUMENTS` is a PR number, restrict to that one and skip the eligibility
-filters in Step 3 (but still do everything in Steps 4–6).
+## Step 3 — Post each verdict
 
-## Step 3 — Decide which PRs are eligible (the skip logic)
+For each subagent that returned a verdict-file path, run:
 
-For each PR, **skip** it this pass if any of these hold:
+`~/.claude/scripts/babysit-post.sh <number> <verdict-file>`
 
-1. `isDraft == true`.
-2. It carries a `wip` label, or its title starts with `WIP`/`[WIP]`.
-3. Its last push was within `QUIET_PERIOD_MINUTES` — compare `updatedAt` (and,
-   if you want precision, the head commit's `committedDate` via
-   `gh pr view <N> --json commits`) against now. If too fresh, skip; it'll be
-   picked up next pass.
+The script re-fetches the head SHA and **discards the verdict if the author pushed
+mid-review** (it prints a `STALE (discarded)` row; that PR is re-picked next pass
+because the SHA will still mismatch). On a match it posts the comment, swaps the
+label, and prints a `posted` row. Collect each script's one-line row.
 
-For PRs that survive those, classify by comparing the **current** `headRefOid`
-to the SHA in your most recent marker comment:
+## Step 4 — Report
 
-- Find your prior verdict: `gh pr view <N> --json comments` → newest comment
-  whose body contains `<!-- runegate-redteam ...`. Parse its `sha` and `pass`.
-- **No marker** → `FIRST_REVIEW`.
-- **Marker sha == headRefOid** → `UP_TO_DATE` → skip (nothing changed).
-- **Marker sha != headRefOid** → `RE_REVIEW` (fixes arrived since you last looked).
+Print a compact table from the rows the post script emitted, plus a line per
+`deferred` PR (`deferred to next pass`). Columns: PR # · class · verdict ·
+conflicts · outcome.
 
-## Step 4 — Order and cap
-
-Build the work list, then **sort**: all `RE_REVIEW` PRs first (contributors are
-waiting on your follow-up), then `FIRST_REVIEW` oldest-`updatedAt`-first. Take
-the first `MAX_PRS_PER_PASS`. Announce what you're reviewing and what you're
-deferring to the next pass (so a capped sweep never silently drops PRs).
-
-## Step 5 — Review each selected PR (parallel subagents)
-
-For each selected PR, spawn a subagent (one per PR, in a single message so they
-run concurrently). Give each agent this self-contained brief:
-
-> Red-team PR #`<N>` of the Runegate repo (a post-breach C# .NET crypto-payments
-> platform under active security audit — see `CLAUDE.md` and `audit/`).
->
-> 1. Capture the head SHA you are reviewing: `gh pr view <N> --json headRefOid`.
-> 2. Read the PR: `gh pr view <N>` (title + description) and the full diff:
->    `gh pr diff <N>`. For context, read changed files in the working tree as needed.
-> 3. Apply this rubric and return a structured verdict — **do NOT post anything
->    to GitHub, do NOT merge, do NOT modify files.** Just return your findings.
->
-> **Rubric:**
->
-> - **Security concerns** — auth/authz, webhooks, money flow, oracle/pricing,
->   crypto, IDOR, injection, secret handling, exception/info leak. Cross-check
->   against the audit conventions (does it touch a known F-NNNN surface? does it
->   reintroduce anything a `scripts/guards/G-*.rule` forbids?). Flag concrete,
->   line-referenced issues — not vibes.
-> - **Summary-vs-code** — does the PR description honestly and completely describe
->   what the diff actually does? Call out anything the diff does that the summary
->   omits, understates, or misstates (especially scope creep into sensitive areas).
-> - **For a re-review** (you'll be told the prior verdict and SHA): focus on the
->   delta since that SHA (`gh pr diff <N>` vs the prior head) and state, per prior
->   concern, whether it is **addressed / partially addressed / still open / regressed**.
->
-> **Return exactly:**
->
-> - `verdict`: one of `pass` / `pass-with-comments` / `blocked-with-comments`
->   (`pass` = no concerns, mergeable; `pass-with-comments` = mergeable, advisory
->   non-blocking notes, fixes optional; `blocked-with-comments` = do not merge
->   until addressed).
-> - `reviewed_sha`: the head SHA you reviewed.
-> - `bottom_line`: 2–4 sentences, conclusion-first (BLUF) — mergeable-or-not, the
->   net security risk in one phrase, and the single most important actionable item
->   stated as advisory-or-blocking. Write it so the orchestrator can drop it in
->   verbatim as the lead, without re-deriving it from the detail bullets below.
-> - `summary_match`: 2–4 sentences on summary-vs-code.
-> - `security`: bullet findings (or "no concerns found").
-> - `rereview_notes`: per-prior-concern status (only if this was a re-review).
-
-When spawning a `RE_REVIEW` agent, include the prior verdict text and prior SHA
-in its brief so it can diff forward and grade each earlier concern.
-
-## Step 6 — Post the verdict (with a stale-review guard)
-
-For each completed review, **before posting**, re-fetch the head SHA:
-`gh pr view <N> --json headRefOid`.
-
-- If it **differs** from the `reviewed_sha` the agent returned, the author pushed
-  mid-review → **discard this verdict, do not post it.** Note that PR will be
-  re-picked next pass (the SHA mismatch guarantees it). Log this; don't post stale.
-- If it **matches**, post the comment and apply the label:
-
-Comment body (fill in; keep the marker line last and exact):
-
-```
-## 🛡️ Red-team verdict: <PASS | PASS WITH COMMENTS | BLOCKED WITH COMMENTS>
-
-**Reviewed:** `<short-sha>` · **Merge conflicts:** <none | ⚠️ CONFLICT — mergeStateStatus=<...>>
-
-> **Bottom line:** <bottom_line — 2–4 sentences, conclusion-first: mergeable-or-not, the net security risk in one phrase, and the single most important actionable item stated as advisory-or-blocking. This leads, before any section below.>
-
-<sub>"Merge conflicts" is a Git mechanical state only — it is **not** a security signal. The security judgment is the verdict above + the findings below.</sub>
-
-### The one fix to make
-<Only when there is a concrete action: the specific change, where, and a one-line "why." Use "### What to address" if there is more than one. Omit this whole section entirely on a clean pass.>
-
-### Full findings (for the record)
-
-**Summary vs. code**
-<summary_match>
-
-**Security review**
-<security findings, or "No concerns found.">
-
-<**Re-review (pass #<n>)**  — only when RE_REVIEW
-<per-prior-concern: addressed / partial / open / regressed>>
-
----
-<sub>Automated red-team pass #<N>. **Not a merge approval** — the merge decision is manual. Reply or push fixes and the next sweep will re-review.</sub>
-<!-- runegate-redteam sha=<headRefOid> verdict=<pass|pass-with-comments|blocked-with-comments> pass=<N> -->
-```
-
-Post with: `gh pr comment <N> --body-file <tmpfile>` (use a temp file to preserve
-formatting). Then set the label, removing the other two redteam labels:
-
-```
-gh pr edit <N> --add-label "redteam:<verdict>" \
-  --remove-label "redteam:<other1>" --remove-label "redteam:<other2>" 2>/dev/null || \
-gh pr edit <N> --add-label "redteam:<verdict>"
-```
-
-Increment `pass` = prior pass + 1 (or 1 for a first review).
-
-## Step 7 — Report
-
-Print a compact table of what you did this pass: PR # · classification ·
-verdict · conflicts(none/CONFLICT) · posted/skipped(stale)/deferred. **Never** run
-`gh pr merge`, `git merge`, or push. Merge stays with the human.
+**Never** run `gh pr merge`, `git merge`, or push. The merge decision stays with
+the human.

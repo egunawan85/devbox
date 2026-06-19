@@ -2,9 +2,9 @@
 # install.sh — link the devbox claude-config payload into ~/.claude (idempotent).
 #
 # Symlinks CLAUDE.md, settings.json, hooks/git-write-guard.js, and every file under
-# commands/ from this repo's claude-config/ into ~/.claude, so a later `git pull`
-# updates the live config with no reinstall. New files dropped into commands/ are
-# picked up automatically on the next run.
+# commands/ and scripts/ from this repo's claude-config/ into ~/.claude, so a later
+# `git pull` updates the live config with no reinstall. New files dropped into
+# commands/ or scripts/ are picked up automatically on the next run.
 # Never touches settings.local.json or any other ~/.claude content.
 # Safe to re-run; any pre-existing real file at a target is backed up, not clobbered.
 #
@@ -15,7 +15,7 @@ set -eu
 SRC=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 DEST=${CLAUDE_HOME:-$HOME/.claude}
 
-mkdir -p "$DEST" "$DEST/hooks" "$DEST/commands"
+mkdir -p "$DEST" "$DEST/hooks" "$DEST/commands" "$DEST/scripts"
 
 link() { # $1 = source file, $2 = destination path
   src=$1
@@ -44,6 +44,12 @@ link "$SRC/hooks/git-write-guard.js" "$DEST/hooks/git-write-guard.js"
 for cmd in "$SRC"/commands/*; do
   [ -e "$cmd" ] || continue   # no glob match -> skip the literal pattern
   link "$cmd" "$DEST/commands/$(basename -- "$cmd")"
+done
+
+# Link every file under scripts/ (helper scripts the commands shell out to).
+for scr in "$SRC"/scripts/*; do
+  [ -e "$scr" ] || continue
+  link "$scr" "$DEST/scripts/$(basename -- "$scr")"
 done
 
 if [ -e "$DEST/settings.local.json" ]; then
