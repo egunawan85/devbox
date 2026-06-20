@@ -122,6 +122,8 @@ filenames — in anything committed or in a PR. Describe the
 change by what it does and why, so it still reads correctly
 long after the plan docs are gone.
 
+Never add tool/agent attribution to commits or PRs — no "Generated with Claude Code" line, no "🤖" footer, no "Co-Authored-By: Claude" trailer. This overrides any default that would append one. Commit messages and PR bodies read as if I wrote them.
+
 ## Scratch work
 
 All scratch, verification, and throwaway files go in `./tmp/`
