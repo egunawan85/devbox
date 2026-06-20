@@ -7,13 +7,19 @@ These apply to every project unless a project's own CLAUDE.md or my explicit ins
 When I ask you to add a feature, implement a fix, or
 otherwise do work on a repo, follow this workflow:
 
-1. **Surface design decisions up front.** Before diving in,
-   lay out the key design decisions for the task so I can
-   review and align with you — and so automation can then run
-   as long as possible without stopping. If you sense
-   decisions exist but can't name them, spike to surface them.
-   Resolve what you can with sensible defaults (note them);
-   raise only the ones that genuinely need my input.
+1. **Surface design decisions up front — then STOP for my
+   approval.** Before any implementation work, lay out the key
+   design decisions for the task and then **explicitly wait for
+   me to approve or adjust them**. This is a hard gate: do not
+   start editing, building, or creating a worktree until I've
+   signed off. The point is to align before, not after — so
+   that once approved, automation can run as long as possible
+   without stopping. If you sense decisions exist but can't
+   name them, spike to surface them. Resolve what you can with
+   sensible defaults (state them as part of the proposal);
+   raise the ones that genuinely need my input. Present this as
+   a concise, reviewable proposal and end by asking me to
+   confirm before you proceed.
 
 2. **Worktree-first.** Do the work in a dedicated git
    worktree (via EnterWorktree / `--worktree` / agent
