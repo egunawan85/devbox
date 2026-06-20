@@ -35,9 +35,11 @@ const WORKTREE_OK = new Set(['add', 'commit', 'push']);
 
 // A push that names main/master as a target bypasses the merge-to-main gate, so it must
 // always ask — even from inside a worktree. Matches `... main`, `... master`, `:main`,
-// `HEAD:master`, etc. False positives (e.g. a branch literally named main-fix) only cost
-// a spurious prompt, never a missed gate.
-const PUSH_TO_MAIN = /\bpush\b[\s\S]*?(?::|\s)(?:HEAD:)?(?:main|master)\b/i;
+// `HEAD:master`, and the fully-qualified refspec `HEAD:refs/heads/main`. The boundary
+// before main/master is `:`, whitespace, or a `refs/heads/` prefix — deliberately NOT a
+// bare `/`, so a branch like `feature/main` doesn't trip it. False positives (e.g. a
+// branch literally named main-fix) only cost a spurious prompt, never a missed gate.
+const PUSH_TO_MAIN = /\bpush\b[\s\S]*?(?:[:\s]|refs\/heads\/)(?:HEAD:)?(?:main|master)\b/i;
 
 // git global options that consume a following separate argument.
 const OPT_WITH_ARG = new Set([
