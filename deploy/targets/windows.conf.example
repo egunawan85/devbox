@@ -15,7 +15,10 @@ OS=windows
 SUBSCRIPTION_ID=
 RESOURCE_GROUP=devbox-rg
 REGION=southeastasia
-SIZE=Standard_D4s_v5    # 4 vCPU / 16 GB — room for VS Build Tools + SQL Express + a build
+# 4 vCPU / 16 GB — room for VS Build Tools + SQL Express + a build. AMD Dads_v7; chosen
+# because the Intel Dsv5 family had a 0-core quota on this subscription/region (check yours
+# with `az vm list-usage -l <region>`; request an increase or pick a family that has quota).
+SIZE=Standard_D4ads_v7
 IMAGE=MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition:latest
 
 # Generic name knobs shared with the common core: the VM name, the NSG (firewall) name,
