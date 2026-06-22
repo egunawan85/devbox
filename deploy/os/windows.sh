@@ -101,3 +101,17 @@ os_vault_start()             { _win_todo "OpenBao Windows service"              
 os_autoseal_arm()            { _win_todo "auto-seal Scheduled Task"                 "#11"; }
 # Soft skip (not a hard stop): session-secrets is opt-in, and configure must still complete.
 os_install_session_secrets() { log "windows session-secrets materializer not installed yet (#12) — skipping"; }
+
+# os_install_toolchain HOST — Layer B: install the project build toolchain (VS Build Tools,
+# SQL Express, NuGet, PS7, Azure CLI, go-sqlcmd) via az run-command (as SYSTEM). Invoked by
+# the `toolchain` subcommand, not by `up` (it's long — ~20-30 min — and project-specific).
+# Windows is always the Azure provider (spec P1), so run-command + RESOURCE_GROUP here is fine.
+os_install_toolchain() {
+  local host=$1 script="$SCRIPT_DIR/azure/toolchain.ps1"
+  need az
+  [ -f "$script" ] || die "missing toolchain script: $script"
+  log "installing project toolchain on $host (VS Build Tools + SQL Express + PS7/Azure CLI; ~20-30 min)"
+  az vm run-command invoke -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
+    --command-id RunPowerShellScript --scripts "@$script" --query "value[].message" -o tsv \
+    || die "toolchain install (run-command) failed — see C:\\devbox-toolchain.log on the box"
+}

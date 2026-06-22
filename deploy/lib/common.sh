@@ -420,6 +420,24 @@ cmd_vault() {
   esac
 }
 
+# Install the project build toolchain on the box (Layer B). Separate from `up` because it's
+# long (~20-30 min) and project-specific; run it once after the box is configured.
+cmd_toolchain() {
+  load_conf
+  local host=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --host) host=$2; shift 2 ;;
+      *) die "toolchain: unknown arg $1" ;;
+    esac
+  done
+  if [ -z "$host" ]; then prov_ready; host=$(prov_ip); fi
+  [ -n "$host" ] || die "no host — pass --host or provision first"
+  ssh_box "$host" 'exit 0'   # pin host key before the install
+  os_install_toolchain "$host"
+  log "toolchain install complete"
+}
+
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
@@ -440,6 +458,7 @@ main() {
     ssh)       cmd_ssh "$@" ;;
     status)    cmd_status "$@" ;;
     render)    cmd_render "$@" ;;
+    toolchain) cmd_toolchain "$@" ;;
     vault)     cmd_vault "$@" ;;
     down)      cmd_down "$@" ;;
     help|-h|--help) usage ;;
