@@ -52,11 +52,21 @@ Each requirement is observable — you can check whether a given box satisfies i
 - **A3** **Up to two device public keys** (laptop + desktop) are authorized for
   `eddyg`. These are my existing keys — the same ones I use for repos.
 - **A4** **No private key is ever stored on the box.** The box performs outbound
-  authenticated work (git, other devboxes) via **SSH agent forwarding** of my
-  device's agent — never a key at rest on the box.
+  authenticated work (git, other devboxes) without a key at rest. _Linux:_ via **SSH
+  agent forwarding** of my device's agent. _Windows:_ the OpenSSH **server** on Windows
+  does not implement agent forwarding (confirmed even on the latest OpenSSH v10), so the
+  forwarded-agent mechanism is unavailable and is replaced by two paths: (a) the **devbox
+  config** is **pushed from the operator's machine** over the authenticated SSH session
+  during `configure` (the box never authenticates to GitHub for it); (b) **project repos**
+  (the box's actual work) are reached by **interactive `gh auth login` + HTTPS git** in a
+  dev session — a revocable, scoped OAuth token in `gh`'s config, consistent with the
+  interactive box-auth already blessed by [E6]/[T4]. No SSH private key is ever stored on
+  either OS.
 - **A5** After deploy, I can reach the box from **either device with no password
-  prompt**, and agent forwarding works (e.g. `ssh-add -l` over the connection shows
-  my keys; `git ls-remote` to a private repo succeeds from the box).
+  prompt**. _Linux:_ agent forwarding works (`ssh-add -l` over the connection shows my
+  keys; `git ls-remote` to a private repo succeeds from the box). _Windows:_ `configure`
+  delivers the config repo via push-from-laptop, and a `gh auth login` session can clone
+  the project repos over HTTPS (see A4).
 
 ## C — Claude configuration
 

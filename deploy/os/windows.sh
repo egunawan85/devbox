@@ -42,32 +42,52 @@ os_box_ready() {
   ssh_box "$1" 'powershell -NoProfile -Command "if (Test-Path C:\devbox-ready) { exit 0 } else { exit 1 }"' 2>/dev/null
 }
 
-# os_configure HOST — clone/pull the repo over the forwarded agent, run install.ps1, and
-# verify the toolchain + guard. The host-key pin happens in common (cmd_configure) before
-# this. The remote default shell is PowerShell; we feed each script via stdin to
-# `powershell -Command -` to avoid quoting hell. GitHub's host keys were pinned at first boot.
+# win_ps HOST — run a PowerShell script (read from stdin) on the box via -EncodedCommand.
+# EncodedCommand delivers the whole script cohesively; `powershell -Command -` reads stdin
+# line-by-line and breaks multi-line blocks (if/else). No agent forwarding is used (Windows
+# OpenSSH server doesn't implement it — see os_configure). Host key already pinned by caller.
+win_ps() {
+  local host=$1 enc
+  enc=$(iconv -t UTF-16LE | base64 | tr -d '\n')
+  ssh -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+      "$DEVBOX_USER@$host" "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"
+}
+
+# os_configure HOST — deliver the repo to the box, run install.ps1, verify toolchain + guard.
+# Windows can't pull from GitHub via a forwarded agent (the OpenSSH *server* on Windows does
+# not implement agent forwarding — confirmed even on v10), so instead the operator's machine
+# PUSHES the repo (a tar of REPO_BRANCH) over the already-authenticated SSH session via scp
+# (SFTP — binary-clean, unlike piping a tarball through the PowerShell login shell). The box
+# never authenticates to GitHub for the config (nothing at rest). Project repos
+# (runegate/qrypto-omni) use interactive `gh auth login` + HTTPS in a dev session — see A4.
+# Host-key pin happens in common (cmd_configure) before this.
 os_configure() {
   local host=$1
-  log "cloning/pulling repo + running install.ps1"
-  # Unquoted heredoc: bash fills in REPO_* (validated conf); \$ keeps PowerShell vars literal.
-  ssh -A -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
-      "$DEVBOX_USER@$host" 'powershell -NoProfile -ExecutionPolicy Bypass -Command -' <<EOF || die "windows configure: clone/install failed"
-\$ErrorActionPreference = 'Stop'
-\$env:GIT_SSH_COMMAND = 'ssh -o StrictHostKeyChecking=yes'
-\$repo = '$REPO_DIR'; \$branch = '$REPO_BRANCH'; \$url = '$REPO_URL'
-if (Test-Path (Join-Path \$repo '.git')) {
-  git -C \$repo fetch origin \$branch; if (\$LASTEXITCODE) { exit 1 }
-  git -C \$repo checkout \$branch;     if (\$LASTEXITCODE) { exit 1 }
-  git -C \$repo pull --ff-only;        if (\$LASTEXITCODE) { exit 1 }
-} else {
-  git clone --branch \$branch \$url \$repo; if (\$LASTEXITCODE) { exit 1 }
-}
+  need git; need scp; need iconv; need base64
+  log "pushing repo ($REPO_BRANCH) to the box + running install.ps1"
+  local repotop tarball
+  repotop=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel) || die "configure: operator side is not a git repo"
+  tarball=$(mktemp "${TMPDIR:-/tmp}/devbox-payload.XXXXXX")
+  git -C "$repotop" archive --format=tar.gz -o "$tarball" "$REPO_BRANCH" \
+    || { rm -f "$tarball"; die "configure: 'git archive $REPO_BRANCH' failed (does the branch exist locally?)"; }
+  # SFTP is binary-clean. Lands at the SSH default dir (the user home) as payload.tgz.
+  scp -q -P "$SSH_PORT" -o StrictHostKeyChecking=yes "$tarball" "$DEVBOX_USER@$host:payload.tgz" \
+    || { rm -f "$tarball"; die "configure: scp of payload failed"; }
+  rm -f "$tarball"
+  # Extract into REPO_DIR + run install.ps1 (cohesive script via win_ps). Unquoted heredoc:
+  # bash fills in $REPO_DIR; \$ keeps PowerShell vars literal.
+  win_ps "$host" <<EOF || die "windows configure: extract/install failed"
+\$ErrorActionPreference='Stop'; \$ProgressPreference='SilentlyContinue'
+\$repo='$REPO_DIR'
+New-Item -ItemType Directory -Force -Path \$repo | Out-Null
+tar -xzf "\$env:USERPROFILE\payload.tgz" -C \$repo
+if (\$LASTEXITCODE) { exit 1 }
+Remove-Item "\$env:USERPROFILE\payload.tgz" -Force
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path \$repo 'claude-config\install.ps1')
 exit \$LASTEXITCODE
 EOF
   log "verifying toolchain + guard"
-  ssh -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
-      "$DEVBOX_USER@$host" 'powershell -NoProfile -ExecutionPolicy Bypass -Command -' <<'EOF' || die "windows configure: verify failed"
+  win_ps "$host" <<'EOF' || die "windows configure: verify failed"
 $bad = 0
 foreach ($c in 'git','gh','node','claude') {
   if (Get-Command $c -ErrorAction SilentlyContinue) { Write-Host "  ok    $c" } else { Write-Host "  FAIL  $c"; $bad++ }
