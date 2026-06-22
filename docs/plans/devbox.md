@@ -8,14 +8,17 @@
 
 - **Phase:** 0 ✅, 1 ✅, 2 ✅ (DigitalOcean, RT-hardened), 2c ✅ (OpenBao **prod** vault,
   2× external RT). `devbox up` is now **one command** (provision → configure → vault
-  init/unseal → load all secrets), idempotent. All on `main`. Azure/Windows = 2b (deferred).
-- **Branch:** `main` (all feature branches merged).
+  init/unseal → load all secrets), idempotent. All on `main`. Azure/Windows = 2b
+  (**planned 2026-06-22**, see Phase 2b — full Layer A/B/C plan + spec §E amendment; build
+  not started).
+- **Branch:** `main` (all feature branches merged); Windows planning on `worktree-windows-devbox`.
 - **Linux path: live-verified (2026-06-17).** Provision + configure + vault + secrets +
   V1/V2/V4 all confirmed on a real DO box (`178.128.85.201`). One note: `AUTOSEAL_TTL=5min`
   is aggressive for interactive admin (see Phase 2c finding).
-- **Next action:** Windows/Azure (Phase 2b) is the only build work left. Optional Linux
-  follow-up: verify the standalone config-only path (D2, Phase 3) against this same box —
-  no new infra needed. Then delete this plan file once Windows ships.
+- **Next action:** Build Phase 2b (Windows/Azure) per the now-detailed plan — start with a
+  live de-risk of Layer B (unattended VS Build Tools + SQL Express on a real Server 2022),
+  since the spike is paper-only. Optional Linux follow-up: verify the standalone config-only
+  path (D2) against the same box. Then delete this plan file once Windows ships.
 - **Blocked on:** nothing for Linux. Windows/Azure deferred. Also pending (operator,
   non-blocking): rename local checkout `claude-configs/` → `devbox/`.
 
@@ -149,7 +152,107 @@ vault path = `secret/<project>`. (Dev/in-memory mode removed.)_
       `kv delete` fail with 503 — had to re-unseal. Not a bug (E9 by design), but 5min is
       aggressive for interactive admin work; load-then-use promptly, or raise the TTL.
 
-### Phase 2b — Azure / Windows (deferred)
+### Phase 2b — Azure / Windows
+
+> **Scope (decided 2026-06-22).** The Windows box is a **build / test / edit** box, not
+> an IIS-hosting box: clone the repos, restore (NuGet), build (MSBuild), run the test
+> suites, and edit with Claude — no IIS/WCF hosting (deferred; structure for it, don't
+> install it). It carries the **first "project profile"** layered on the base devbox:
+> the toolchain for **runegate** + **qrypto-omni** (private `s16rv` repos) — classic
+> **.NET Framework 4.6.2/4.7.2 + WCF + ASP.NET**, **SQL Server** (TSQL), built with
+> **MSBuild + VS Build Tools** (not `dotnet`), secrets via **Azure Key Vault in prod /
+> `.vault` locally**. These genuinely require Windows; they are not portable .NET.
+
+**Design decisions (resolved 2026-06-22).**
+- **Provisioner = `az` CLI + PowerShell + bash**, mirroring the DigitalOcean choice (no
+  Terraform, no state file — Azure is the source of truth; idempotency by querying VM
+  name; teardown by name/resource-group). Lives in `deploy/azure/`, dispatched from the
+  same `deploy/devbox` CLI.
+- **Box role = build/test/edit.** SQL Server **Express, installed on the box** (not
+  Docker, not external). IIS/WCF features deferred to a later "run" role.
+- **Secrets = OpenBao ported to Windows** (the operator's choice), serving as the
+  **dev-time stand-in for Azure Key Vault**. Materialize into each repo's `.vault`/`.env`
+  per the amended **spec §E8 (Windows)**: SYSTEM **60 s watchdog** + **4624/4634 event
+  triggers**, reference-count wipe-at-zero, **encrypted-disk-at-rest** on the ephemeral
+  box (see §E at-rest note). The repos' own Azure Key Vault path (`inject-secrets.ps1`)
+  is untouched — that's their prod deploy concern, not the devbox's.
+- **Cross-OS guard needs no port** — `git-write-guard.js` already handles the PowerShell
+  call/dot-source operator and runs via `node`.
+
+#### Layer A — base Windows devbox (P, D, N, A, C, T1–T2)
+- [ ] `deploy/azure/provision.ps1` — first-boot setup via Azure **Custom Script Extension**
+      (the cloud-init analog): create `eddyg` (admin), install + enable **OpenSSH Server**,
+      set **PowerShell as the default SSH shell**, harden (key-only, no password, SSH on the
+      non-default port, agent forwarding), seed GitHub host keys. No secrets, no repo at boot.
+- [ ] `deploy/azure` provisioning in the `devbox` CLI (`az` + bash): create resource group +
+      Windows Server 2022 VM; **NSG inbound = SSH port only, no 3389/RDP** (N1/N4); idempotent
+      by VM name; `down` deletes the resource group (no orphaned billable resources, D4).
+- [ ] Teach `cmd_configure` the **`--os windows`** branch (it hard-rejects today at
+      `deploy/devbox:505`): clone/pull over the forwarded agent, run `install.ps1`, run the
+      verify block in PowerShell.
+- [ ] `claude-config/install.ps1` — mirror `install.sh`: link payload into `~/.claude`
+      (**directory junctions** to avoid the Developer-Mode/admin symlink requirement),
+      preserve `settings.local.json`, back up pre-existing real files, honor `CLAUDE_HOME`.
+- [ ] Base toolchain in `provision.ps1`: git, gh, **Node LTS**, **Claude Code CLI**.
+
+#### Layer B — project toolchain for runegate / qrypto-omni (T3, build/test role)
+_Heaviest, least-precedented layer. Installed by `provision.ps1` via **direct MSI/exe +
+Chocolatey** — **NOT winget** (absent on Server 2022, see spike). Must handle **reboots
+mid-install** (exit 3010) and **Machine-PATH refresh**; raise the readiness budget to
+~30–40 min for this box._
+- [ ] **VS 2022 Build Tools** — Web dev workload + FW targeting packs (verified recipe below).
+- [ ] **NuGet CLI** (`nuget.exe` on PATH), **PowerShell 7**, **Azure CLI** (for the repos'
+      own Key Vault path), **go-sqlcmd**.
+- [ ] **SQL Server Express 2022** on the box — mixed-mode auth + TCP/1433 (repos use SQL
+      auth: `DB_USER`/`DB_PASSWORD`); create the least-privilege `pgcrypto_app` login per
+      the repos' `DEPLOY_DB.md`.
+- [ ] **Deferred (IIS role):** IIS + WCF Windows features, `deploy-iis.ps1`, HTTPS — not in
+      the build/test box; revisit when a "run" role is wanted.
+- [ ] Verify: clone each repo over the forwarded agent → `nuget restore` → MSBuild the `.sln`
+      → run a test project (e.g. `*.Tests.Unit`) green; `sqlcmd` connects to the local instance.
+
+#### Layer C — OpenBao vault on Windows (E1–E9, amended §E)
+- [ ] `provision.ps1` installs **`bao` (Windows)** — pinned `2.5.4`, **SHA256-verified
+      against `checksums-windows.txt`** (mirror the Linux discipline).
+- [ ] `vault_start` (Windows): write the prod HCL (`file` storage, `127.0.0.1:8200`, TLS
+      off), run `bao server` as a **Windows Service** (auto-start, boots sealed — E7).
+- [ ] `vault_init` / `unseal` / `load` — reuse the **HTTP-API core** (already OS-agnostic);
+      PowerShell wrappers (`Invoke-RestMethod`); keys saved to the laptop, scoped `devbox-app`
+      token on the box; unseal key/token off argv.
+- [ ] **Session-count materializer** (replaces the Linux tmpfs/logind path — §E8 Windows):
+      SYSTEM scheduled task (60 s) + 4624/4634 event triggers; recount eddyg SSH sessions
+      (per-connection `sshd.exe` owned by eddyg); materialize vault → repo `.vault`/`.env`
+      when ≥1 & unsealed, wipe when zero; only-our-files manifest; boot ⇒ wipe stale.
+      Manifest = Windows analog of `secrets.map` (`<project> → repo path`).
+- [ ] **Auto-seal TTL** (optional, E9): **Scheduled Task** (not systemd timer) + seal-only token.
+
+#### Spike — verified unattended-install recipe (2026-06-22, paper spike)
+_Verified against current vendor docs; **live validation deferred** to first Azure
+bring-up (no Server 2022 host on the macOS operator machine)._
+- **VS Build Tools (silent):**
+  `vs_buildtools.exe --quiet --wait --norestart --nocache --add
+  Microsoft.VisualStudio.Workload.WebBuildTools --add
+  Microsoft.Net.Component.4.7.2.TargetingPack --add
+  Microsoft.Net.Component.4.6.2.TargetingPack --includeRecommended`
+  — `--wait` is **mandatory** (bootstrapper returns early otherwise); **exit 3010 =
+  reboot-required, treat as success-pending-reboot**, not failure.
+- **SQL Express 2022 (silent):**
+  `/Q /ACTION=Install /FEATURES=SQLEngine /INSTANCENAME=SQLEXPRESS
+  /IACCEPTSQLSERVERLICENSETERMS /SECURITYMODE=SQL /SAPWD=<gen>
+  /TCPENABLED=1 /SQLSYSADMINACCOUNTS="BUILTIN\Administrators"`.
+- **sqlcmd** = go-sqlcmd (Chocolatey/direct zip); **NuGet** = direct `nuget.exe`;
+  **PS7 / Azure CLI** = MSI (per the repos' own `DEPLOY.md`).
+- **Cross-cutting gotchas:** winget absent on Server 2022 ⇒ direct downloads/Chocolatey;
+  handle reboots (3010) + continuation; refresh Machine PATH so new tools resolve;
+  generous readiness timeout; VS Build Tools is multi-GB / several minutes.
+
+#### Open risks / to validate live (first Azure bring-up)
+- Unattended VS Build Tools + SQL Express on a real Server 2022 (the spike is paper-only).
+- Reboot-during-provision orchestration via CSE (single CSE run vs. boot-continuation task).
+- Windows OpenSSH session-count signal (`sshd.exe`-per-connection) under VS Code Remote.
+- `bao` as a Windows Service surviving reboot + unseal-after-reboot (E7 on Windows).
+
+#### Original stub (superseded by the above)
 - [ ] Windows VM provisioning (`az` CLI or Terraform), NSG inbound 2222 only, no RDP.
 - [ ] `install.ps1` (Windows): mirror `install.sh`; verify on the Azure box.
 
@@ -308,3 +411,24 @@ _Append dated entries as work happens (newest last). Today: 2026-06-16._
   needed), `vault_load_all`, `vault_host` (reuses up's IP). Vault defaults moved to
   `load_conf`. Docs cleaned: spec D1, plan Status, README usage. Linux path complete;
   only the live deployment test remains.
+- **2026-06-22** **Planned Phase 2b (Windows/Azure)** for the first concrete project
+  profile: the private `s16rv` repos **runegate** + **qrypto-omni**. Inspected both via
+  `gh`: classic **.NET Framework 4.6.2/4.7.2 + WCF + ASP.NET**, SQL Server (TSQL), built
+  with **MSBuild + VS Build Tools** (not `dotnet`), IIS deploy, secrets via **Azure Key
+  Vault (prod) / `.vault` (local)** — genuinely Windows-only. Operator decisions: box role
+  = **build/test/edit** (no IIS hosting yet); **SQL Express on the box**; **OpenBao ported
+  to Windows** as the dev-time Key-Vault stand-in. Designed the Windows secrets lifecycle
+  in depth (the crux being Windows has no logind/tmpfs): materialize vault → repo
+  `.vault`/`.env` on **encrypted-disk-at-rest**, wipe by a **reference count** of eddyg SSH
+  sessions — **SYSTEM 60 s watchdog** (authoritative; survives hard-kills, dropped
+  connections, crash/reboot) **+ 4624/4634 event triggers** (fast path); wipe-iff-zero in
+  both. **Amended spec §E** to be OS-parameterized (E7 boot service, E8 Linux-tmpfs /
+  Windows-watchdog, E9 timer/scheduled-task, new at-rest note + V5) so the Windows box
+  *satisfies* the contract rather than violating its RAM-only clause. Ran a **paper spike**
+  (no Server 2022 host on macOS) verifying the unattended-install recipe against vendor
+  docs: VS Build Tools workload/component IDs + `--wait`/exit-3010, SQL Express silent
+  switches (mixed-mode + TCP), go-sqlcmd/NuGet/PS7/Azure-CLI install paths, and the key
+  gotcha that **winget is absent on Server 2022** (use direct MSI/Choco + reboot/PATH
+  handling). Wrote the full Layer A (base Windows box) / B (project toolchain) / C (vault
+  port) checklist into Phase 2b. **No provisioning/vault code written yet** — next is a
+  live de-risk of Layer B on a real Server 2022. Work on `worktree-windows-devbox`.

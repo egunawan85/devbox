@@ -88,6 +88,15 @@ App secrets are served on the box by an **OpenBao vault**, gated by the SSH logi
 loaded each session from a durable plaintext home on the operator's machine. The vault
 is a **disposable, session-scoped cache** — its contents die with the box.
 
+**OS applicability.** The *model* (E1–E6) is OS-neutral: an SSH-gated, localhost-bound
+OpenBao vault, fed from the laptop, dying with the box. The *mechanics* differ by OS
+because the substrate does — Linux uses systemd + tmpfs + logind; Windows has none of
+these and substitutes a Windows Service, an encrypted-disk materialization, and a
+session-count watchdog. Where a requirement names a Linux mechanism it states the Windows
+equivalent inline. **OpenBao itself is cross-platform** (the project ships a `bao`
+Windows binary), so the vault server, init/unseal, and `load` are the same on both; only
+the lifecycle wrappers (E7–E9) are OS-specific.
+
 - **E1** App secrets are served by an **OpenBao vault running on the devbox in
   production mode (`file` storage, sealed/encrypted at rest), bound to `127.0.0.1`
   only** — unreachable from the network. The **SSH login is the access gate**: only a
@@ -109,28 +118,56 @@ is a **disposable, session-scoped cache** — its contents die with the box.
   per session and the box **never stores the unseal key**. The box holds only a
   **least-privilege token** (policy `devbox-app`, scoped to `secret/*`), not root, in
   **owner-only `0600` files** for load/reads. Neither the unseal key nor any token is
-  ever passed on the command line — they travel via stdin/env, so `ps` /
-  `/proc/<pid>/cmdline` can't leak them.
+  ever passed on the command line — they travel via stdin/env, so a process listing
+  (`ps` / `/proc/<pid>/cmdline` on Linux, the equivalent process inspection on Windows)
+  can't leak them.
 - **E6** The box's *own* auth (Claude, GitHub) follows the same spirit — interactive
   login + forwarded SSH agent, nothing at rest (see [A], [T]).
 - **E7** **Production mode, sealed-on-disk, re-init per box.** OpenBao stores its data
   encrypted on the box's disk; it boots **sealed** and is unsealed per session from the
-  operator's key. It runs under a systemd unit so it **auto-starts (sealed) on every
-  boot** — after a reboot the server is up and `vault unseal` reopens it (no re-init).
-  Because the box is disposable (no persistent volume), each fresh box is
-  **re-initialized** — it gets a new unseal key + root token, saved to the laptop for
-  that box's life. (Chosen over dev/in-memory mode for a real unlock gate.)
+  operator's key. It runs as a **boot service that auto-starts (sealed) on every boot**
+  — _Linux:_ a systemd unit; _Windows:_ a Windows Service (auto-start) — so after a
+  reboot the server is up and `vault unseal` reopens it (no re-init). Because the box is
+  disposable (no persistent volume), each fresh box is **re-initialized** — it gets a new
+  unseal key + root token, saved to the laptop for that box's life. (Chosen over
+  dev/in-memory mode for a real unlock gate.)
 - **E8** _Optional._ **On-login materialization for file-based apps.** When the operator
-  declares a manifest (vault project → dest `.env` path), each login materializes those
-  secrets into the app's `.env` files **on tmpfs (RAM), never the box's disk**, and they
-  are wiped when the operator's **last** session ends (logind reference-counts sessions —
-  a lingering one, e.g. a VS Code server, keeps them until it too ends). Requires the
-  vault unsealed; cleanup never touches a real file, the operator's store, or the vault.
+  declares a manifest (vault project → dest path), the box materializes those secrets
+  into the app's secret files while the operator is logged in, and **wipes them when the
+  operator's _last_ session ends** — a **reference count**, not a per-logout action, so
+  concurrent sessions are safe and a lingering one (e.g. a VS Code server) keeps the
+  files until it too ends. Requires the vault unsealed; cleanup never touches a real file
+  the operator placed, the operator's store, or the vault. The substrate differs by OS:
+  - _Linux:_ secrets materialize to `.env` files **on tmpfs (RAM), never the box's
+    disk**; lifecycle is reference-counted natively by **logind** + a systemd user
+    service (materialize on first session, wipe on last).
+  - _Windows:_ no tmpfs and no logind, so secrets materialize to each cloned repo's
+    gitignored **`.vault`/`.env`** files — the very files the app's own loader already
+    consumes — on the box's **encrypted, ephemeral disk** (owner/SYSTEM-ACL'd), and the
+    reference count is **rebuilt by a SYSTEM watchdog** (60 s timer: recount the
+    operator's live SSH sessions; materialize when ≥ 1 and the vault is unsealed, wipe
+    when **zero**), with **logon/logoff event-log triggers (4624/4634)** layered on for
+    near-instant wipe in the clean cases. Both paths run the identical "recount, wipe iff
+    zero" logic, so they cannot disagree; the watchdog is authoritative and survives
+    hard-kills (closed window, dropped connection) and crash/reboot leftovers (0 sessions
+    at boot ⇒ stale files wiped before first login). Only files devbox wrote are ever
+    wiped (tracked manifest). This **accepts encrypted-disk-at-rest on the ephemeral box**
+    as the Windows substitute for Linux's RAM-only property — see the at-rest note below.
 - **E9** _Optional._ **Auto-seal TTL.** The vault can be set to **re-seal a fixed time
-  after each unseal** (reset on every unseal), enforced by a systemd timer using a
-  **seal-only** token (capability `sys/seal` only — it can lock the vault but **cannot
-  read any secret**; root stays on the laptop). Re-locks a forgotten-unsealed vault; it
-  does not wipe already-materialized session files (lock-only).
+  after each unseal** (reset on every unseal), enforced by a boot-managed timer
+  (_Linux:_ systemd timer; _Windows:_ Scheduled Task) using a **seal-only** token
+  (capability `sys/seal` only — it can lock the vault but **cannot read any secret**;
+  root stays on the laptop). Re-locks a forgotten-unsealed vault; it does not wipe
+  already-materialized session files (lock-only).
+
+**At-rest posture (OS-dependent).** Linux keeps materialized secrets **RAM-only** (tmpfs)
+— never on the box's disk. Windows cannot match that cheaply (no user-space tmpfs), so it
+substitutes **session-lifecycle-bounded encrypted-disk-at-rest**: the materialized
+`.vault`/`.env` exist on the box's encrypted, ephemeral disk **only while the operator has
+a live session** (E8's reference count), and are gone at last logout and at teardown.
+That window — "while you're logged in and working" — is exactly when the secret is already
+plaintext in process memory anyway, so it does not widen the runtime exposure below. (A
+RAM-disk could restore the RAM-only property later if wanted; deliberately deferred.)
 
 **Runtime exposure (inherent, not removable).** To *use* a secret, its plaintext must
 sit in process memory, where co-resident code on the box (e.g. a malicious dependency)
@@ -153,6 +190,12 @@ production secrets.
   OpenBao; an app on the box can read it back **only from within an SSH session**
   (vault is unreachable from the network); and after teardown nothing usable remains
   (E1–E3).
+- **V5** _(if E8 is enabled)_ The materialized secret files appear while the operator is
+  logged in and are **gone once the operator's last session ends** — verified per OS:
+  _Linux_, the `.env` is a tmpfs-backed link wiped at last logout; _Windows_, the repo's
+  `.vault`/`.env` are real files on the encrypted disk that the watchdog wipes when the
+  operator's SSH session count reaches zero (and a closed window / dropped connection
+  wipes them too, not just a clean logout).
 
 ## Resolved decisions (2026-06-16)
 
