@@ -87,7 +87,7 @@ ensure_nsg() {
 # admin password Azure requires at create is random and discarded: it is never used (no RDP
 # path; SSH is key-only), so it can't be a standing credential.
 prov_provision() {
-  need openssl; need iconv; need base64
+  need openssl
   ensure_resource_group
   ensure_nsg
   local pw; pw=$(openssl rand -base64 24)
@@ -100,14 +100,18 @@ prov_provision() {
     || die "az vm create failed"
   unset pw
   local ip; ip=$(prov_wait_ip) || die "VM created but no public IP appeared within ~60s"
-  log "VM at $ip — running first-boot provision.ps1 via Custom Script Extension (a few minutes)"
-  # provision.ps1 -> EncodedCommand (PowerShell wants base64 of UTF-16LE). Runs as SYSTEM.
-  # az vm extension set blocks until the CSE finishes, so on return the box is provisioned.
-  local enc; enc=$(os_render_firstboot | iconv -t UTF-16LE | base64 | tr -d '\n')
-  az vm extension set -g "$RESOURCE_GROUP" --vm-name "$DROPLET_NAME" \
-    --name CustomScriptExtension --publisher Microsoft.Compute --version 1.10 \
-    --protected-settings "{\"commandToExecute\":\"powershell -ExecutionPolicy Bypass -EncodedCommand $enc\"}" \
-    -o none || die "Custom Script Extension (provision.ps1) failed — check boot diagnostics / C:\\devbox-provision.log on the box"
+  log "VM at $ip — running first-boot provision.ps1 via run-command (a few minutes)"
+  # Deliver provision.ps1 to the guest agent as script DATA (not a command line). This
+  # avoids the Windows command-line length limit the CustomScript EncodedCommand path hits
+  # for non-trivial scripts ("The command line is too long"). Runs as SYSTEM; @file keeps
+  # the script off the local arg list too.
+  local script; script=$(mktemp "${TMPDIR:-/tmp}/devbox-provision.XXXXXX")
+  os_render_firstboot > "$script"
+  if ! az vm run-command invoke -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
+        --command-id RunPowerShellScript --scripts "@$script" -o none; then
+    rm -f "$script"; die "provision.ps1 (run-command) failed — check boot diagnostics / C:\\devbox-provision.log on the box"
+  fi
+  rm -f "$script"
   PROVISIONED_IP="$ip"
 }
 

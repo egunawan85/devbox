@@ -32,17 +32,25 @@ __AUTHORIZED_KEYS_BLOCK__
   Set-Content -Path $akf -Value $keys -Encoding ascii
   icacls.exe $akf /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" | Out-Null
 
-  # --- sshd hardening. sshd uses the FIRST occurrence of each keyword, so prepend ours. ---
+  # --- sshd config. Write a COMPLETE config rather than editing a default: the OpenSSH
+  #     capability may not have generated the default sshd_config yet at this point (sshd
+  #     isn't started until the end), so there is nothing to merge with. Crucially, the
+  #     `Match Group administrators` block points admin users (our login user IS the VM
+  #     admin) at administrators_authorized_keys — without it sshd reads ~/.ssh and denies. ---
   $cfg = Join-Path $sshDir 'sshd_config'
-  $hardening = @"
+  $cfgContent = @"
 Port $port
 PasswordAuthentication no
 PubkeyAuthentication yes
 AllowAgentForwarding yes
 X11Forwarding no
+AuthorizedKeysFile .ssh/authorized_keys
+Subsystem sftp sftp-server.exe
+
+Match Group administrators
+       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys
 "@
-  $existing = if (Test-Path $cfg) { Get-Content -Raw $cfg } else { '' }
-  Set-Content -Path $cfg -Value ($hardening + "`r`n" + $existing) -Encoding ascii
+  Set-Content -Path $cfg -Value $cfgContent -Encoding ascii
 
   # --- Default SSH shell = Windows PowerShell (Layer B may repoint to pwsh 7 later) ---
   New-Item -Path 'HKLM:\SOFTWARE\OpenSSH' -Force | Out-Null
