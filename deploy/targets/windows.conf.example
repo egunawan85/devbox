@@ -1,0 +1,42 @@
+# devbox 'windows' profile — Azure / Windows Server 2022 build-test box.
+# Copy to deploy/targets/windows.conf (gitignored) and edit. Select it with:
+#   devbox -p windows up | configure | ssh | status | down | vault ...
+#
+# Azure auth is interactive: run `az login` once on this machine (browser, or
+# `az login --use-device-code`). The subscription is pinned per-profile below
+# (SUBSCRIPTION_ID); the CLI runs `az account set` so it never depends on whatever
+# subscription happens to be globally active.
+
+PROVIDER=azure
+OS=windows
+
+# --- Azure target ---
+# SUBSCRIPTION_ID: az account list --query "[?name=='<your sub>'].id" -o tsv
+SUBSCRIPTION_ID=
+RESOURCE_GROUP=devbox-rg
+REGION=southeastasia
+SIZE=Standard_D4s_v5    # 4 vCPU / 16 GB — room for VS Build Tools + SQL Express + a build
+IMAGE=MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition:latest
+
+# Generic name knobs shared with the common core: the VM name, the NSG (firewall) name,
+# and an Azure tag. DROPLET_NAME is the historical key the core uses for "the box".
+DROPLET_NAME=devbox-win
+FIREWALL_NAME=devbox-win-nsg
+TAG=devbox
+
+# --- Access (key-only SSH on a non-default port; no RDP) ---
+DEVBOX_USER=eddyg
+SSH_PORT=2222
+# Public key(s) authorized for login AND forwarded for outbound git. Space/newline list.
+SSH_PUBKEY_FILES="$HOME/.ssh/id_ed25519.pub"
+
+# --- Config source (cloned on the box during `configure`, via your forwarded key) ---
+REPO_URL=git@github.com:egunawan85/devbox.git
+REPO_BRANCH=main
+# Checkout path on the Windows box. Forward slashes are fine for OpenSSH + PowerShell.
+REPO_DIR=C:/Users/eddyg/devbox
+
+# --- Secrets (devbox vault, ported to Windows — Phase 2b Layer C) ---
+# Local plaintext store on your laptop: one <project>.env per project (KEY=value lines).
+SECRETS_DIR="$HOME/devbox-secrets"
+VAULT_MOUNT=secret
