@@ -286,3 +286,6 @@ os_render_firstboot()        { render_cloud_init; }
 os_vault_start()             { vault_start "$1"; }
 os_autoseal_arm()            { autoseal_arm "$1"; }
 os_install_session_secrets() { install_session_secrets "$1"; }
+# No project toolchain layer for Linux (the DO box's baseline is enough); no-op for the
+# `toolchain` subcommand so it's a clean cross-OS contract.
+os_install_toolchain()       { log "no project toolchain layer for the linux profile — nothing to install"; }

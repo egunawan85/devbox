@@ -42,7 +42,76 @@ os_box_ready() {
   ssh_box "$1" 'powershell -NoProfile -Command "if (Test-Path C:\devbox-ready) { exit 0 } else { exit 1 }"' 2>/dev/null
 }
 
-os_configure()               { _win_todo "configure (clone + install.ps1 + verify)" "#8/#9"; }
+# win_ps HOST — run a PowerShell script (read from stdin) on the box via -EncodedCommand.
+# EncodedCommand delivers the whole script cohesively; `powershell -Command -` reads stdin
+# line-by-line and breaks multi-line blocks (if/else). No agent forwarding is used (Windows
+# OpenSSH server doesn't implement it — see os_configure). Host key already pinned by caller.
+win_ps() {
+  local host=$1 enc
+  enc=$(iconv -t UTF-16LE | base64 | tr -d '\n')
+  ssh -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+      "$DEVBOX_USER@$host" "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"
+}
+
+# os_configure HOST — deliver the repo to the box, run install.ps1, verify toolchain + guard.
+# Windows can't pull from GitHub via a forwarded agent (the OpenSSH *server* on Windows does
+# not implement agent forwarding — confirmed even on v10), so instead the operator's machine
+# PUSHES the repo (a tar of REPO_BRANCH) over the already-authenticated SSH session via scp
+# (SFTP — binary-clean, unlike piping a tarball through the PowerShell login shell). The box
+# never authenticates to GitHub for the config (nothing at rest). Project repos
+# (runegate/qrypto-omni) use interactive `gh auth login` + HTTPS in a dev session — see A4.
+# Host-key pin happens in common (cmd_configure) before this.
+os_configure() {
+  local host=$1
+  need git; need scp; need iconv; need base64
+  log "pushing repo ($REPO_BRANCH) to the box + running install.ps1"
+  local repotop tarball
+  repotop=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel) || die "configure: operator side is not a git repo"
+  tarball=$(mktemp "${TMPDIR:-/tmp}/devbox-payload.XXXXXX")
+  git -C "$repotop" archive --format=tar.gz -o "$tarball" "$REPO_BRANCH" \
+    || { rm -f "$tarball"; die "configure: 'git archive $REPO_BRANCH' failed (does the branch exist locally?)"; }
+  # SFTP is binary-clean. Lands at the SSH default dir (the user home) as payload.tgz.
+  scp -q -P "$SSH_PORT" -o StrictHostKeyChecking=yes "$tarball" "$DEVBOX_USER@$host:payload.tgz" \
+    || { rm -f "$tarball"; die "configure: scp of payload failed"; }
+  rm -f "$tarball"
+  # Extract into REPO_DIR + run install.ps1 (cohesive script via win_ps). Unquoted heredoc:
+  # bash fills in $REPO_DIR; \$ keeps PowerShell vars literal.
+  win_ps "$host" <<EOF || die "windows configure: extract/install failed"
+\$ErrorActionPreference='Stop'; \$ProgressPreference='SilentlyContinue'
+\$repo='$REPO_DIR'
+New-Item -ItemType Directory -Force -Path \$repo | Out-Null
+tar -xzf "\$env:USERPROFILE\payload.tgz" -C \$repo
+if (\$LASTEXITCODE) { exit 1 }
+Remove-Item "\$env:USERPROFILE\payload.tgz" -Force
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path \$repo 'claude-config\install.ps1')
+exit \$LASTEXITCODE
+EOF
+  log "verifying toolchain + guard"
+  win_ps "$host" <<'EOF' || die "windows configure: verify failed"
+$bad = 0
+foreach ($c in 'git','gh','node','claude') {
+  if (Get-Command $c -ErrorAction SilentlyContinue) { Write-Output "  ok    $c" } else { Write-Output "  FAIL  $c"; $bad++ }
+}
+$guard = '{"tool_input":{"command":"git push"}}' | node (Join-Path $HOME '.claude\hooks\git-write-guard.js')
+if ("$guard" -match '"permissionDecision":"ask"') { Write-Output "  ok    git-write-guard fires" } else { Write-Output "  FAIL  git-write-guard"; $bad++ }
+if ($bad -eq 0) { Write-Output "verify: all checks passed" } else { Write-Output "verify: $bad check(s) failed"; exit 1 }
+EOF
+}
 os_vault_start()             { _win_todo "OpenBao Windows service"                  "#11"; }
 os_autoseal_arm()            { _win_todo "auto-seal Scheduled Task"                 "#11"; }
-os_install_session_secrets() { _win_todo "session-count materializer"               "#12"; }
+# Soft skip (not a hard stop): session-secrets is opt-in, and configure must still complete.
+os_install_session_secrets() { log "windows session-secrets materializer not installed yet (#12) — skipping"; }
+
+# os_install_toolchain HOST — Layer B: install the project build toolchain (VS Build Tools,
+# SQL Express, NuGet, PS7, Azure CLI, go-sqlcmd) via az run-command (as SYSTEM). Invoked by
+# the `toolchain` subcommand, not by `up` (it's long — ~20-30 min — and project-specific).
+# Windows is always the Azure provider (spec P1), so run-command + RESOURCE_GROUP here is fine.
+os_install_toolchain() {
+  local host=$1 script="$SCRIPT_DIR/azure/toolchain.ps1"
+  need az
+  [ -f "$script" ] || die "missing toolchain script: $script"
+  log "installing project toolchain on $host (VS Build Tools + SQL Express + PS7/Azure CLI; ~20-30 min)"
+  az vm run-command invoke -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
+    --command-id RunPowerShellScript --scripts "@$script" --query "value[].message" -o tsv \
+    || die "toolchain install (run-command) failed — see C:\\devbox-toolchain.log on the box"
+}

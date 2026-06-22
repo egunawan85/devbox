@@ -10,6 +10,7 @@
 #   devbox [-p PROFILE] ssh               connect (agent-forwarded) to the box
 #   devbox [-p PROFILE] status            show the box
 #   devbox [-p PROFILE] render            print the rendered first-boot config (no API calls)
+#   devbox [-p PROFILE] toolchain         install the project build toolchain (windows: ~20-30 min)
 #   devbox [-p PROFILE] vault up          bring the vault to ready (start + init/unseal)
 #   devbox [-p PROFILE] vault init        init + unseal a fresh box (saves keys to laptop)
 #   devbox [-p PROFILE] vault unseal      re-unseal an existing box from your saved key
