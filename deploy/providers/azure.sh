@@ -66,15 +66,60 @@ ensure_resource_group() {
     || die "failed to create resource group '$RESOURCE_GROUP'"
 }
 
-# prov_provision — create the NSG (inbound SSH only, no RDP) + Windows VM, run provision.ps1
-# via Custom Script Extension, wait for ready. The first `az vm create` is billable, so this
-# is intentionally not implemented until the next slice (and behind your explicit go-ahead).
-prov_provision() {
-  die "azure prov_provision: VM bring-up is the next slice (#6) — and the first 'az vm create' is the billable step, gated on your go-ahead. Config + auth + read-only ops are wired; run 'devbox -p windows status' to exercise them."
+# ensure_nsg — create/reconcile the network security group: inbound tcp/$SSH_PORT only, no
+# RDP. Azure NSGs default-deny inbound, so this single allow rule is the whole inbound policy
+# (the N1/N4 control). Idempotent.
+ensure_nsg() {
+  az network nsg show -g "$RESOURCE_GROUP" -n "$FIREWALL_NAME" >/dev/null 2>&1 \
+    || { log "creating NSG '$FIREWALL_NAME'"; az network nsg create -g "$RESOURCE_GROUP" -n "$FIREWALL_NAME" -l "$REGION" -o none || die "failed to create NSG '$FIREWALL_NAME'"; }
+  log "reconciling NSG '$FIREWALL_NAME' (inbound tcp/$SSH_PORT only, no RDP)"
+  az network nsg rule create -g "$RESOURCE_GROUP" --nsg-name "$FIREWALL_NAME" \
+    --name allow-ssh --priority 1000 --direction Inbound --access Allow --protocol Tcp \
+    --source-address-prefixes '*' --source-port-ranges '*' \
+    --destination-address-prefixes '*' --destination-port-ranges "$SSH_PORT" -o none 2>/dev/null \
+  || az network nsg rule update -g "$RESOURCE_GROUP" --nsg-name "$FIREWALL_NAME" \
+    --name allow-ssh --priority 1000 --destination-port-ranges "$SSH_PORT" --access Allow -o none \
+  || die "failed to set NSG allow-ssh rule"
 }
 
-# prov_destroy — tear down the box. Will delete the whole resource group (no orphaned
-# billable resources) + prune known_hosts. Implemented alongside prov_provision (#6).
+# prov_provision — RG + NSG + Windows VM (no RDP rule) + first-boot provision.ps1 via the
+# Custom Script Extension, then return once the box is reachable. Sets PROVISIONED_IP. The
+# admin password Azure requires at create is random and discarded: it is never used (no RDP
+# path; SSH is key-only), so it can't be a standing credential.
+prov_provision() {
+  need openssl; need iconv; need base64
+  ensure_resource_group
+  ensure_nsg
+  local pw; pw=$(openssl rand -base64 24)
+  log "creating VM '$DROPLET_NAME' ($SIZE, Windows Server 2022, $REGION) — no RDP rule"
+  az vm create -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
+    --image "$IMAGE" --size "$SIZE" \
+    --admin-username "$DEVBOX_USER" --admin-password "$pw" \
+    --nsg "$FIREWALL_NAME" --nsg-rule NONE \
+    --public-ip-sku Standard --tags "$TAG" -o none \
+    || die "az vm create failed"
+  unset pw
+  local ip; ip=$(prov_wait_ip) || die "VM created but no public IP appeared within ~60s"
+  log "VM at $ip — running first-boot provision.ps1 via Custom Script Extension (a few minutes)"
+  # provision.ps1 -> EncodedCommand (PowerShell wants base64 of UTF-16LE). Runs as SYSTEM.
+  # az vm extension set blocks until the CSE finishes, so on return the box is provisioned.
+  local enc; enc=$(os_render_firstboot | iconv -t UTF-16LE | base64 | tr -d '\n')
+  az vm extension set -g "$RESOURCE_GROUP" --vm-name "$DROPLET_NAME" \
+    --name CustomScriptExtension --publisher Microsoft.Compute --version 1.10 \
+    --protected-settings "{\"commandToExecute\":\"powershell -ExecutionPolicy Bypass -EncodedCommand $enc\"}" \
+    -o none || die "Custom Script Extension (provision.ps1) failed — check boot diagnostics / C:\\devbox-provision.log on the box"
+  PROVISIONED_IP="$ip"
+}
+
+# prov_destroy — delete the whole resource group (VM, NSG, public IP, disk, NIC — no orphaned
+# billable resources) and prune the box from known_hosts. $1 = ip (optional).
 prov_destroy() {
-  die "azure prov_destroy: not implemented yet (#6) — will delete resource group '$RESOURCE_GROUP' and prune known_hosts."
+  local ip=${1:-}
+  log "deleting resource group '$RESOURCE_GROUP' (VM + NSG + IP + disk + NIC)"
+  az group delete -n "$RESOURCE_GROUP" --yes -o none || warn "resource group '$RESOURCE_GROUP' delete failed or already gone"
+  if [ -n "$ip" ]; then
+    ssh-keygen -R "[$ip]:$SSH_PORT" >/dev/null 2>&1 || true
+    ssh-keygen -R "$ip"             >/dev/null 2>&1 || true
+  fi
+  log "done. (Azure resource-group teardown leaves nothing billable.)"
 }
