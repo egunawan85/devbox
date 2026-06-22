@@ -42,7 +42,42 @@ os_box_ready() {
   ssh_box "$1" 'powershell -NoProfile -Command "if (Test-Path C:\devbox-ready) { exit 0 } else { exit 1 }"' 2>/dev/null
 }
 
-os_configure()               { _win_todo "configure (clone + install.ps1 + verify)" "#8/#9"; }
+# os_configure HOST — clone/pull the repo over the forwarded agent, run install.ps1, and
+# verify the toolchain + guard. The host-key pin happens in common (cmd_configure) before
+# this. The remote default shell is PowerShell; we feed each script via stdin to
+# `powershell -Command -` to avoid quoting hell. GitHub's host keys were pinned at first boot.
+os_configure() {
+  local host=$1
+  log "cloning/pulling repo + running install.ps1"
+  # Unquoted heredoc: bash fills in REPO_* (validated conf); \$ keeps PowerShell vars literal.
+  ssh -A -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+      "$DEVBOX_USER@$host" 'powershell -NoProfile -ExecutionPolicy Bypass -Command -' <<EOF || die "windows configure: clone/install failed"
+\$ErrorActionPreference = 'Stop'
+\$env:GIT_SSH_COMMAND = 'ssh -o StrictHostKeyChecking=yes'
+\$repo = '$REPO_DIR'; \$branch = '$REPO_BRANCH'; \$url = '$REPO_URL'
+if (Test-Path (Join-Path \$repo '.git')) {
+  git -C \$repo fetch origin \$branch; if (\$LASTEXITCODE) { exit 1 }
+  git -C \$repo checkout \$branch;     if (\$LASTEXITCODE) { exit 1 }
+  git -C \$repo pull --ff-only;        if (\$LASTEXITCODE) { exit 1 }
+} else {
+  git clone --branch \$branch \$url \$repo; if (\$LASTEXITCODE) { exit 1 }
+}
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path \$repo 'claude-config\install.ps1')
+exit \$LASTEXITCODE
+EOF
+  log "verifying toolchain + guard"
+  ssh -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+      "$DEVBOX_USER@$host" 'powershell -NoProfile -ExecutionPolicy Bypass -Command -' <<'EOF' || die "windows configure: verify failed"
+$bad = 0
+foreach ($c in 'git','gh','node','claude') {
+  if (Get-Command $c -ErrorAction SilentlyContinue) { Write-Host "  ok    $c" } else { Write-Host "  FAIL  $c"; $bad++ }
+}
+$guard = '{"tool_input":{"command":"git push"}}' | node (Join-Path $HOME '.claude\hooks\git-write-guard.js')
+if ("$guard" -match '"permissionDecision":"ask"') { Write-Host "  ok    git-write-guard fires" } else { Write-Host "  FAIL  git-write-guard"; $bad++ }
+if ($bad -eq 0) { Write-Host "verify: all checks passed" } else { Write-Host "verify: $bad check(s) failed"; exit 1 }
+EOF
+}
 os_vault_start()             { _win_todo "OpenBao Windows service"                  "#11"; }
 os_autoseal_arm()            { _win_todo "auto-seal Scheduled Task"                 "#11"; }
-os_install_session_secrets() { _win_todo "session-count materializer"               "#12"; }
+# Soft skip (not a hard stop): session-secrets is opt-in, and configure must still complete.
+os_install_session_secrets() { log "windows session-secrets materializer not installed yet (#12) — skipping"; }
