@@ -159,7 +159,7 @@ cmd_configure() {
   [ -n "$host" ] || die "no host — pass --host or provision first"
   # Pin the box host key WITHOUT forwarding the agent first, so the agent is never
   # exposed to an unverified host (M2). After this, -A uses strict verification.
-  ssh_box "$host" 'true'
+  ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
   log "configuring $DEVBOX_USER@$host (clone/pull repo + install config)"
   os_configure "$host"                # OS-specific: clone/pull + install + verify
   os_install_session_secrets "$host"  # opt-in: only if a local secrets.map exists
@@ -171,7 +171,7 @@ cmd_ssh() {
   local ip; ip=$(prov_ip 2>/dev/null || true)
   [ -n "$ip" ] || { prov_ready; ip=$(prov_ip); }
   [ -n "$ip" ] || die "no box named '$DROPLET_NAME'"
-  ssh_box "$ip" 'true'   # pin host key (no agent) before forwarding (M2)
+  ssh_box "$ip" 'exit 0'   # pin host key (no agent) before forwarding (M2); cross-shell no-op
   exec ssh -A -p "$SSH_PORT" -o StrictHostKeyChecking=yes "$DEVBOX_USER@$ip"
 }
 
@@ -272,7 +272,7 @@ vault_load_all() {
 vault_init() {
   command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
   local host; host=$(vault_host)
-  ssh_box "$host" 'true'
+  ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
   log "initializing + unsealing vault on $host (1 key share, single unseal key)"
   local out
   out=$(ssh_box "$host" 'bash -s' <<'EOF'
@@ -316,7 +316,7 @@ EOF
 vault_unseal() {
   command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
   local host; host=$(vault_host)
-  ssh_box "$host" 'true'
+  ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
   # The server must be up to accept an unseal. With the systemd unit it auto-starts
   # (sealed) on boot; if it's somehow down, point at `vault up` instead of a raw curl error.
   ssh_box "$host" 'curl -fsS --max-time 5 http://127.0.0.1:8200/v1/sys/seal-status >/dev/null 2>&1' \
@@ -352,7 +352,7 @@ vault_load() {
   [ -f "$f" ] || die "no secrets file at $f"
   local host json; host=$(vault_host)
   json=$(env_to_json "$f") || die "failed to parse $f"
-  ssh_box "$host" 'true'
+  ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
   # Friendly pre-check: a sealed vault would otherwise give a raw 503 (L1).
   local sealed
   sealed=$(ssh_box "$host" 'curl -fsS http://127.0.0.1:8200/v1/sys/seal-status 2>/dev/null' 2>/dev/null \
@@ -400,7 +400,7 @@ EOF
 
 vault_status() {
   local host; host=$(vault_host)
-  ssh_box "$host" 'true'
+  ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
   ssh_box "$host" 'export BAO_ADDR="http://127.0.0.1:8200"
     s=$(curl -fsS "$BAO_ADDR/v1/sys/seal-status" 2>/dev/null) || { echo "OpenBao: not running — run: devbox vault up"; exit 0; }
     echo "OpenBao: running (localhost-only); initialized=$(printf "%s" "$s" | jq -r .initialized) sealed=$(printf "%s" "$s" | jq -r .sealed)"'
