@@ -90,11 +90,11 @@ EOF
   win_ps "$host" <<'EOF' || die "windows configure: verify failed"
 $bad = 0
 foreach ($c in 'git','gh','node','claude') {
-  if (Get-Command $c -ErrorAction SilentlyContinue) { Write-Host "  ok    $c" } else { Write-Host "  FAIL  $c"; $bad++ }
+  if (Get-Command $c -ErrorAction SilentlyContinue) { Write-Output "  ok    $c" } else { Write-Output "  FAIL  $c"; $bad++ }
 }
 $guard = '{"tool_input":{"command":"git push"}}' | node (Join-Path $HOME '.claude\hooks\git-write-guard.js')
-if ("$guard" -match '"permissionDecision":"ask"') { Write-Host "  ok    git-write-guard fires" } else { Write-Host "  FAIL  git-write-guard"; $bad++ }
-if ($bad -eq 0) { Write-Host "verify: all checks passed" } else { Write-Host "verify: $bad check(s) failed"; exit 1 }
+if ("$guard" -match '"permissionDecision":"ask"') { Write-Output "  ok    git-write-guard fires" } else { Write-Output "  FAIL  git-write-guard"; $bad++ }
+if ($bad -eq 0) { Write-Output "verify: all checks passed" } else { Write-Output "verify: $bad check(s) failed"; exit 1 }
 EOF
 }
 os_vault_start()             { _win_todo "OpenBao Windows service"                  "#11"; }
