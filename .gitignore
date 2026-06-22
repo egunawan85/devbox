@@ -1,6 +1,8 @@
 # Operator-local deploy config (contains your key paths / choices, not secrets,
-# but machine-specific) — never commit.
+# but machine-specific) — never commit. devbox.conf = default 'linux' profile;
+# targets/<profile>.conf = other profiles (e.g. windows).
 deploy/devbox.conf
+deploy/targets/*.conf
 
 # Operator's plaintext secret store (one <project>.env per project, pushed into the
 # box's vault by `devbox vault load`). PLAINTEXT SECRETS — never commit.
