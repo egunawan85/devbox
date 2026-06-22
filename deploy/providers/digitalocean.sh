@@ -156,7 +156,7 @@ wait_for_box() {
   fi
   while :; do
     elapsed=$(( SECONDS - t0 ))
-    if box_ready "$ip"; then log "box is ready"; return 0; fi
+    if os_box_ready "$ip"; then log "box is ready"; return 0; fi
     if [ "$probe" = on ]; then
       if ping_alive "$ip"; then first_alive=1; fails=0; else fails=$((fails + 1)); fi
       # Never came alive within the liveness window => wedged at the hypervisor (bad VM).
