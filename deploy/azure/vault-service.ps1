@@ -8,6 +8,7 @@
 # seal-status JSON between markers so the operator CLI parses it cleanly.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $ver  = '2.5.4'
 $dir  = 'C:\Program Files\OpenBao'
@@ -21,11 +22,15 @@ if (-not (Test-Path $bao)) {
   $base = "https://github.com/openbao/openbao/releases/download/v$ver"
   $asset = "bao_${ver}_Windows_x86_64.zip"
   $zip = Join-Path $env:TEMP $asset
-  Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset" -OutFile $zip
-  $sums = (Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums-windows.txt").Content
-  $line = ($sums -split "`n" | Where-Object { $_ -match [regex]::Escape($asset) } | Select-Object -First 1)
-  if (-not $line) { throw "checksum line for $asset not found" }
-  $want = $line.Trim().Split(' ')[0].ToLower()
+  $wc = New-Object Net.WebClient   # DownloadString returns a string (Invoke-WebRequest .Content
+  $wc.DownloadFile("$base/$asset", $zip)                       # is a byte[] for octet-stream)
+  $sums = $wc.DownloadString("$base/checksums-windows.txt")
+  $want = $null
+  foreach ($l in ($sums -split "[\r\n]+")) {
+    $f = @(($l.Trim() -split '\s+') | Where-Object { $_ })
+    if ($f.Count -ge 2 -and $f[-1] -eq $asset) { $want = $f[0].ToLower(); break }
+  }
+  if (-not $want) { throw "checksum for $asset not found (fetched $($sums.Length) bytes)" }
   $got  = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
   if ($got -ne $want) { throw "bao zip checksum mismatch: got $got want $want" }
   Expand-Archive -Path $zip -DestinationPath $dir -Force
@@ -64,7 +69,7 @@ if ((Get-Service devbox-vault).Status -ne 'Running') { Start-Service devbox-vaul
 # --- Wait for the API, then emit seal-status JSON between markers ---
 $status = '{"error":"vault server not responding (see C:\\ProgramData\\devbox\\openbao.log)"}'
 foreach ($i in 1..30) {
-  try { $status = (Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8200/v1/sys/seal-status').Content; break }
+  try { $status = (Invoke-RestMethod -UseBasicParsing -Uri 'http://127.0.0.1:8200/v1/sys/seal-status' | ConvertTo-Json -Compress); break }
   catch { Start-Sleep -Seconds 1 }
 }
 Write-Output "__VAULTJSON__${status}__ENDVAULTJSON__"

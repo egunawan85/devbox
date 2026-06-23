@@ -48,7 +48,9 @@ os_box_ready() {
 # OpenSSH server doesn't implement it — see os_configure). Host key already pinned by caller.
 win_ps() {
   local host=$1 enc
-  enc=$(iconv -t UTF-16LE | base64 | tr -d '\n')
+  # Prepend $ProgressPreference=SilentlyContinue: the "Preparing modules" progress stream
+  # otherwise makes PowerShell CLIXML-wrap stdout over SSH, corrupting our marker output.
+  enc=$( { echo "\$ProgressPreference='SilentlyContinue'"; cat; } | iconv -t UTF-16LE | base64 | tr -d '\n')
   ssh -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
       "$DEVBOX_USER@$host" "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"
 }
@@ -160,7 +162,7 @@ win_vault_run() {
 # the secret stays on stdin, never on argv (E5). Echoes marker-wrapped output.
 win_vault_secret() {
   local host=$1 script=$2 enc out
-  enc=$(printf '%s' "$script" | iconv -t UTF-16LE | base64 | tr -d '\n')
+  enc=$(printf "%s\n%s" "\$ProgressPreference='SilentlyContinue'" "$script" | iconv -t UTF-16LE | base64 | tr -d '\n')
   out=$(ssh -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=25 \
         "$DEVBOX_USER@$host" "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc") || return 1
   printf '%s' "$out" | tr -d '\r' | sed -n 's/.*__VAULTJSON__\(.*\)__ENDVAULTJSON__.*/\1/p'
@@ -194,7 +196,7 @@ $apptok = ((& $bao token create -policy=devbox-app -period=768h -format=json | O
 $dir='C:\ProgramData\devbox'; New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Set-Content -Path (Join-Path $dir 'vault.env') -Value @("BAO_ADDR=$($env:BAO_ADDR)", "BAO_TOKEN=$apptok") -Encoding ascii
 $apptok | Set-Content -Path (Join-Path $dir 'bao-token') -Encoding ascii -NoNewline
-Write-Output "__VAULTJSON__$initRaw__ENDVAULTJSON__"
+Write-Output "__VAULTJSON__$($init | ConvertTo-Json -Compress)__ENDVAULTJSON__"
 PS
 )
   out=$(printf '%s\n' "$script" | win_vault_run "$host") || die "vault init failed -- is the server up ('vault up') and not already initialized ('vault unseal')?"
@@ -212,7 +214,7 @@ win_vault_unseal() {
   local host; host=$(vault_host)
   ssh_box "$host" 'exit 0'
   local upscript; upscript=$(cat <<'PS'
-try { Write-Output "__VAULTJSON__$((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8200/v1/sys/seal-status').Content)__ENDVAULTJSON__" } catch { Write-Output '__VAULTJSON__{}__ENDVAULTJSON__' }
+try { Write-Output "__VAULTJSON__$((Invoke-RestMethod -UseBasicParsing 'http://127.0.0.1:8200/v1/sys/seal-status' | ConvertTo-Json -Compress))__ENDVAULTJSON__" } catch { Write-Output '__VAULTJSON__{}__ENDVAULTJSON__' }
 PS
 )
   local up; up=$(printf '%s\n' "$upscript" | win_vault_run "$host")
@@ -261,7 +263,7 @@ win_vault_status() {
   local host; host=$(vault_host)
   ssh_box "$host" 'exit 0'
   local stscript; stscript=$(cat <<'PS'
-try { Write-Output "__VAULTJSON__$((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8200/v1/sys/seal-status').Content)__ENDVAULTJSON__" } catch { Write-Output '__VAULTJSON____ENDVAULTJSON__' }
+try { Write-Output "__VAULTJSON__$((Invoke-RestMethod -UseBasicParsing 'http://127.0.0.1:8200/v1/sys/seal-status' | ConvertTo-Json -Compress))__ENDVAULTJSON__" } catch { Write-Output '__VAULTJSON____ENDVAULTJSON__' }
 PS
 )
   local s; s=$(printf '%s\n' "$stscript" | win_vault_run "$host")
