@@ -6,6 +6,12 @@ allowed-tools: Bash(~/.claude/scripts/babysit-plan.sh:*), Bash(~/.claude/scripts
 
 # /babysit-prs — single red-team sweep (dispatcher)
 
+> **POSIX shell only.** The three `scripts/babysit-*.sh` helpers are bash and
+> need `jq`, `awk`, and `claude -p` on the PATH, so this command runs on
+> macOS/Linux only — not on the Windows devbox (no bash/jq there). It reviews
+> PRs over the GitHub API, so run it from a POSIX host; it never needs to run on
+> the box itself.
+
 You run **one pass** of the PR red-team loop. It is safe to run repeatedly: all
 state lives in GitHub (PR head SHA, your prior verdict comments, labels), so every
 pass re-derives the world from scratch — there is no local state.

@@ -19,7 +19,19 @@
       "Bash(cd /*)",
       "Bash(cd ~*)",
       "Bash(cd ..*)",
-      "Bash(cd -*)"
+      "Bash(cd -*)",
+      "PowerShell(cd)",
+      "PowerShell(cd /*)",
+      "PowerShell(cd *:*)",
+      "PowerShell(cd ~*)",
+      "PowerShell(cd ..*)",
+      "PowerShell(cd -*)",
+      "PowerShell(Set-Location)",
+      "PowerShell(Set-Location /*)",
+      "PowerShell(Set-Location *:*)",
+      "PowerShell(Set-Location ~*)",
+      "PowerShell(Set-Location ..*)",
+      "PowerShell(Set-Location -*)"
     ],
     "ask": [
       "Bash(ssh:*)",
