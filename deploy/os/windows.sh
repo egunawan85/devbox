@@ -97,7 +97,21 @@ if ("$guard" -match '"permissionDecision":"ask"') { Write-Output "  ok    git-wr
 if ($bad -eq 0) { Write-Output "verify: all checks passed" } else { Write-Output "verify: $bad check(s) failed"; exit 1 }
 EOF
 }
-os_vault_start()             { _win_todo "OpenBao Windows service"                  "#11"; }
+# os_vault_start HOST -- install OpenBao + run it as a Windows Service (auto-start, boots
+# sealed -- E7), then echo the seal-status JSON for vault_bringup. The install needs admin, so
+# it runs via az run-command (SYSTEM); vault-service.ps1 emits the status between markers,
+# which we extract clean (robust against PowerShell/CLIXML noise on the wire).
+os_vault_start() {
+  local host=$1 script="$SCRIPT_DIR/azure/vault-service.ps1" out
+  need az; need perl
+  [ -f "$script" ] || die "missing vault service script: $script"
+  perl -ne 'exit 1 if /[^\x00-\x7f]/' "$script" || die "vault-service.ps1 has non-ASCII bytes -- make it pure ASCII"
+  out=$(az vm run-command invoke -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
+    --command-id RunPowerShellScript --scripts "@$script" --query "value[].message" -o tsv 2>&1) \
+    || { printf '{"error":"vault-service run-command failed"}'; return 0; }
+  local json; json=$(printf '%s' "$out" | tr -d '\r' | sed -n 's/.*__VAULTJSON__\(.*\)__ENDVAULTJSON__.*/\1/p')
+  [ -n "$json" ] && printf '%s' "$json" || printf '{"error":"vault-service produced no status (see C:\\ProgramData\\devbox\\openbao.log)"}'
+}
 os_autoseal_arm()            { _win_todo "auto-seal Scheduled Task"                 "#11"; }
 # Soft skip (not a hard stop): session-secrets is opt-in, and configure must still complete.
 os_install_session_secrets() { log "windows session-secrets materializer not installed yet (#12) — skipping"; }
