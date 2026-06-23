@@ -69,7 +69,7 @@ foreach ($m in $maps) {
     $j = (& $bao kv get -mount=secret -format=json $m.proj 2>$null | Out-String | ConvertFrom-Json)
     if (-not $j.data.data) { Log ("skip " + $m.proj + ": empty/not loaded"); continue }
     $kv = @($j.data.data.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" })
-    $pdir = Split-Path -LiteralPath $m.dest -Parent
+    $pdir = Split-Path $m.dest -Parent
     if ($pdir -and -not (Test-Path -LiteralPath $pdir)) { New-Item -ItemType Directory -Force -Path $pdir | Out-Null }
     Set-Content -LiteralPath $m.dest -Value $kv -Encoding ascii
     # restrict to SYSTEM + Administrators (SID, locale-independent) + the user (read).
