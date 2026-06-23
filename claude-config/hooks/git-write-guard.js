@@ -153,6 +153,15 @@ function main() {
   } catch {
     process.exit(0);
   }
+
+  // Normalize path separators to forward slashes. On Windows the hook's `cwd`
+  // (and any `cd` target in the command) is a backslash path, but the
+  // worktree-detection regexes below are written with forward slashes. Without
+  // this, a worktree add/commit that auto-allows on macOS/Linux would degrade to
+  // an "ask" on Windows (fails safe, but not identical). Backslashes only ever
+  // appear in paths here, so this is lossless for our matching.
+  const slash = (p) => p.replace(/\\/g, '/');
+  cwd = slash(cwd);
   if (!cmd.trim()) process.exit(0);
 
   // Split on shell operators ( && || ; | newline ) and PowerShell block /
@@ -173,7 +182,7 @@ function main() {
     if (m) cdTargets.push(m[1] ?? m[2] ?? m[3] ?? '');
   }
   const cdIntoWorktree = cdTargets.length > 0 &&
-                         cdTargets.every((p) => /\.claude\/worktrees\//.test(p));
+                         cdTargets.every((p) => /\.claude\/worktrees\//.test(slash(p)));
   const inWorktree = /\/\.claude\/worktrees\//.test(cwd) || cdIntoWorktree;
 
   const ask = (sub) => {
