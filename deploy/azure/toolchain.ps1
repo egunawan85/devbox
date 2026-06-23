@@ -17,8 +17,10 @@ try {
   $choco = Join-Path $env:ProgramData 'chocolatey\bin\choco.exe'
   if (-not (Test-Path $choco)) { throw "Chocolatey not found ($choco) -- run provision.ps1 first" }
 
-  # --- PowerShell 7, Azure CLI, go-sqlcmd, NuGet CLI (Chocolatey) ---
-  & $choco install -y --no-progress powershell-core azure-cli sqlcmd nuget.commandline
+  # --- PowerShell 7, Azure CLI, go-sqlcmd, NuGet CLI, VC++ runtime (Chocolatey) ---
+  # vcredist140 = the VS2015-2022 VC++ runtime; required by the SQL LocalDB engine (sqlservr.exe
+  # won't start without it -- it was the missing piece when LocalDB was installed by hand).
+  & $choco install -y --no-progress powershell-core azure-cli sqlcmd nuget.commandline vcredist140
   if ($LASTEXITCODE -ne 0) { throw "choco toolchain install failed: exit $LASTEXITCODE" }
 
   # --- VS 2022 Build Tools: Web workload + .NET FW targeting packs (verified recipe) ---
