@@ -139,7 +139,13 @@ committed.
 ## External red-team mechanics
 
 The easy-to-get-wrong details behind step 7. Skip unless
-you're wiring up the automated run.
+you're wiring up the automated run. The shell snippets below
+are POSIX (bash); on a Windows box translate them to
+PowerShell equivalents — e.g. there is no bash `timeout`, so
+cap a run with a background job + `Wait-Job -Timeout` (or
+`Start-Process` + `Wait-Process -Timeout`), and feed the
+prompt via a here-string piped into `claude` rather than a
+heredoc.
 
 - **Branch off the BUILT state.** Each model gets its own
   detached worktree off the current build:
