@@ -14,6 +14,11 @@
 $ErrorActionPreference = 'Stop'
 $dir = 'C:\ProgramData\devbox'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
+# Lock the dir down (the default %ProgramData% ACL grants BUILTIN\Users read+create). Without
+# this a non-admin could read the manifest/state or replace the SYSTEM watchdog script. SYSTEM
+# + Administrators full, eddyg read, inheritance off so children inherit. Idempotent with the
+# identical lock in vault-service.ps1 (whichever runs first wins; this one runs at `configure`).
+icacls $dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' 'eddyg:(OI)(CI)R' | Out-Null
 
 # 1) the watchdog, verbatim (single-quoted here-string: nothing below is expanded now -- it is
 #    written as-is and only evaluated when the task runs it).
@@ -30,9 +35,12 @@ function Log($m) { try { "$([DateTime]::UtcNow.ToString('o')) $m" | Add-Content 
 if (-not (Test-Path $map)) { exit 0 }
 
 # count eddyg's live SSH sessions (each per-connection sshd.exe runs as the logged-in user;
-# the main sshd service runs as SYSTEM and is not counted).
+# the main sshd service runs as SYSTEM and is not counted). Only count processes whose image
+# is the real OpenSSH binary under System32\OpenSSH (a non-admin cannot plant a binary there),
+# so a same-context process merely *named* sshd.exe cannot spoof the count up or down.
 $sessions = 0
 foreach ($p in (Get-CimInstance Win32_Process -Filter "Name='sshd.exe'")) {
+  if (-not $p.ExecutablePath -or -not $p.ExecutablePath.ToLower().EndsWith('\system32\openssh\sshd.exe')) { continue }
   $o = Invoke-CimMethod -InputObject $p -MethodName GetOwner
   if ($o -and $o.User -eq $user) { $sessions++ }
 }
@@ -71,10 +79,17 @@ foreach ($m in $maps) {
     $kv = @($j.data.data.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" })
     $pdir = Split-Path $m.dest -Parent
     if ($pdir -and -not (Test-Path -LiteralPath $pdir)) { New-Item -ItemType Directory -Force -Path $pdir | Out-Null }
-    Set-Content -LiteralPath $m.dest -Value $kv -Encoding ascii
-    # restrict to SYSTEM + Administrators (SID, locale-independent) + the user (read).
-    icacls $m.dest /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" ("$user" + ":R") 2>&1 | Out-Null
+    # Write to a temp, lock it, then atomically rename into place: the app never sees a partial
+    # file, and the secret never exists at $dest with a permissive (inherited) ACL. UTF-8 no-BOM
+    # (not -Encoding ascii, which silently mangles any non-ASCII secret value to '?').
+    $tmp = "$($m.dest).devboxtmp"
+    [IO.File]::WriteAllLines($tmp, $kv, (New-Object Text.UTF8Encoding $false))
+    icacls $tmp /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" ("$user" + ":R") 2>&1 | Out-Null
+    Move-Item -LiteralPath $tmp -Destination $m.dest -Force
     $written += [pscustomobject]@{ proj=$m.proj; dest=$m.dest }
+    # Record what we wrote BEFORE materializing the next one, so a crash never leaves an
+    # untracked (and therefore never-wiped) secret file lingering after logout.
+    $written | ConvertTo-Json -Compress | Set-Content -LiteralPath $state -Encoding ascii
   } catch { Log ("error " + $m.proj + ": " + $_) }
 }
 # drop any file we wrote before that is no longer in the manifest.
