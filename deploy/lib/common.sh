@@ -270,6 +270,7 @@ vault_load_all() {
 # install the root token on the box, and save the unseal key + root token to the
 # LAPTOP keys file. Re-init per box: a fresh box gets fresh keys.
 vault_init() {
+  [ "$OS" = windows ] && { win_vault_init; return; }   # PowerShell-native path (os/windows.sh)
   command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
   local host; host=$(vault_host)
   ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
@@ -314,6 +315,7 @@ EOF
 
 # Re-unseal an already-initialized box (e.g. after a reboot) using the saved key.
 vault_unseal() {
+  [ "$OS" = windows ] && { win_vault_unseal; return; }   # PowerShell-native path (os/windows.sh)
   command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
   local host; host=$(vault_host)
   ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
@@ -352,6 +354,7 @@ vault_load() {
   [ -f "$f" ] || die "no secrets file at $f"
   local host json; host=$(vault_host)
   json=$(env_to_json "$f") || die "failed to parse $f"
+  [ "$OS" = windows ] && { printf '%s' "$json" | win_vault_load "$proj" "$VAULT_MOUNT" "$host"; return; }   # PowerShell-native (os/windows.sh)
   ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
   # Friendly pre-check: a sealed vault would otherwise give a raw 503 (L1).
   local sealed
@@ -399,6 +402,7 @@ EOF
 }
 
 vault_status() {
+  [ "$OS" = windows ] && { win_vault_status; return; }   # PowerShell-native path (os/windows.sh)
   local host; host=$(vault_host)
   ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
   ssh_box "$host" 'export BAO_ADDR="http://127.0.0.1:8200"

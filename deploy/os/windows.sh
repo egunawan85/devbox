@@ -112,7 +112,10 @@ os_vault_start() {
   local json; json=$(printf '%s' "$out" | tr -d '\r' | sed -n 's/.*__VAULTJSON__\(.*\)__ENDVAULTJSON__.*/\1/p')
   [ -n "$json" ] && printf '%s' "$json" || printf '{"error":"vault-service produced no status (see C:\\ProgramData\\devbox\\openbao.log)"}'
 }
-os_autoseal_arm()            { _win_todo "auto-seal Scheduled Task"                 "#11"; }
+# Auto-seal is optional (off unless AUTOSEAL_TTL is set). The Scheduled-Task implementation is
+# a later slice; until then, no-op silently when off and warn (don't die) when a TTL is set so
+# `vault up` still completes.
+os_autoseal_arm() { [ -n "${AUTOSEAL_TTL:-}" ] && log "windows auto-seal (Scheduled Task) not implemented yet (#11) -- ignoring AUTOSEAL_TTL=$AUTOSEAL_TTL"; return 0; }
 # Soft skip (not a hard stop): session-secrets is opt-in, and configure must still complete.
 os_install_session_secrets() { log "windows session-secrets materializer not installed yet (#12) — skipping"; }
 
@@ -136,4 +139,132 @@ os_install_toolchain() {
   # provision wrote only on success.
   ssh_box "$host" 'powershell -NoProfile -Command "if (Test-Path C:\devbox-toolchain-ready) { exit 0 } else { exit 1 }"' \
     || die "toolchain did not complete (no C:\\devbox-toolchain-ready) -- check C:\\devbox-toolchain.log via '$(basename "$0") -p $DEVBOX_PROFILE ssh'"
+}
+
+# ---- vault data path (PowerShell-native; called via OS branch from common.sh) ---------------
+# bao.exe (installed by vault-service.ps1) + Invoke-RestMethod to the localhost API; no jq/curl.
+# Each box-side script wraps its result in __VAULTJSON__...__ENDVAULTJSON__ so we parse it clean
+# despite any CLIXML/banner noise on the wire. The vault binary + env files live under
+# C:\Program Files\OpenBao and C:\ProgramData\devbox (the Windows analog of ~/.config/devbox).
+
+# win_vault_run HOST -- run a PowerShell script (read from this fn's stdin) on the box and echo
+# the marker-wrapped text. For calls with NO secret input (init, status, server-up check).
+win_vault_run() {
+  local host=$1 out
+  out=$(win_ps "$host") || return 1
+  printf '%s' "$out" | tr -d '\r' | sed -n 's/.*__VAULTJSON__\(.*\)__ENDVAULTJSON__.*/\1/p'
+}
+
+# win_vault_secret HOST SCRIPT -- run SCRIPT on the box with a SECRET piped to its stdin (the
+# script reads it via [Console]::In). The script goes via -EncodedCommand (argv, not secret);
+# the secret stays on stdin, never on argv (E5). Echoes marker-wrapped output.
+win_vault_secret() {
+  local host=$1 script=$2 enc out
+  enc=$(printf '%s' "$script" | iconv -t UTF-16LE | base64 | tr -d '\n')
+  out=$(ssh -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=25 \
+        "$DEVBOX_USER@$host" "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc") || return 1
+  printf '%s' "$out" | tr -d '\r' | sed -n 's/.*__VAULTJSON__\(.*\)__ENDVAULTJSON__.*/\1/p'
+}
+
+# win_vault_init -- operator init (1-of-1) -> unseal -> enable kv-v2 -> scoped devbox-app token
+# -> write the box's vault.env + token, and return the init JSON (unseal key + root) to the
+# laptop. Keys are generated on the box and travel back over the SSH channel; never on argv.
+win_vault_init() {
+  command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
+  local host; host=$(vault_host)
+  ssh_box "$host" 'exit 0'
+  log "initializing + unsealing vault on $host (1 key share, single unseal key)"
+  local script out
+  script=$(cat <<'PS'
+$ErrorActionPreference='Stop'
+$bao='C:\Program Files\OpenBao\bao.exe'; $env:BAO_ADDR='http://127.0.0.1:8200'
+$st = Invoke-RestMethod -UseBasicParsing -Uri "$($env:BAO_ADDR)/v1/sys/seal-status"
+if ($st.initialized) { Write-Output '__VAULTJSON__{"error":"ALREADY_INITIALIZED"}__ENDVAULTJSON__'; exit 0 }
+$initRaw = (& $bao operator init -key-shares=1 -key-threshold=1 -format=json | Out-String).Trim()
+$init = $initRaw | ConvertFrom-Json
+Invoke-RestMethod -UseBasicParsing -Method Put -Uri "$($env:BAO_ADDR)/v1/sys/unseal" -Body (@{key=$init.unseal_keys_b64[0]} | ConvertTo-Json) | Out-Null
+$env:BAO_TOKEN = $init.root_token
+& $bao secrets enable -path=secret kv-v2 | Out-Null
+$pol = @'
+path "secret/data/*" { capabilities = ["create","read","update","delete"] }
+path "secret/metadata/*" { capabilities = ["read","list","delete"] }
+'@
+$pol | & $bao policy write devbox-app - | Out-Null
+$apptok = ((& $bao token create -policy=devbox-app -period=768h -format=json | Out-String) | ConvertFrom-Json).auth.client_token
+$dir='C:\ProgramData\devbox'; New-Item -ItemType Directory -Force -Path $dir | Out-Null
+Set-Content -Path (Join-Path $dir 'vault.env') -Value @("BAO_ADDR=$($env:BAO_ADDR)", "BAO_TOKEN=$apptok") -Encoding ascii
+$apptok | Set-Content -Path (Join-Path $dir 'bao-token') -Encoding ascii -NoNewline
+Write-Output "__VAULTJSON__$initRaw__ENDVAULTJSON__"
+PS
+)
+  out=$(printf '%s\n' "$script" | win_vault_run "$host") || die "vault init failed -- is the server up ('vault up') and not already initialized ('vault unseal')?"
+  case "$out" in *ALREADY_INITIALIZED*) die "this box's vault is already initialized -- use '$(basename "$0") -p $DEVBOX_PROFILE vault unseal'" ;; esac
+  [ -n "$out" ] || die "vault init produced no keys"
+  umask 077; mkdir -p "$(dirname "$VAULT_KEYS_FILE")"
+  printf '%s' "$out" > "$VAULT_KEYS_FILE"; chmod 600 "$VAULT_KEYS_FILE"
+  log "vault initialized + unsealed. Keys saved to $VAULT_KEYS_FILE"
+  warn "KEEP $VAULT_KEYS_FILE SAFE -- it holds this box's unseal key + root token (the box itself has only a scoped token)."
+}
+
+# win_vault_unseal -- re-unseal from the saved laptop key. Key is piped on stdin, never argv.
+win_vault_unseal() {
+  command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
+  local host; host=$(vault_host)
+  ssh_box "$host" 'exit 0'
+  local upscript; upscript=$(cat <<'PS'
+try { Write-Output "__VAULTJSON__$((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8200/v1/sys/seal-status').Content)__ENDVAULTJSON__" } catch { Write-Output '__VAULTJSON__{}__ENDVAULTJSON__' }
+PS
+)
+  local up; up=$(printf '%s\n' "$upscript" | win_vault_run "$host")
+  printf '%s' "$up" | jq -e '.sealed' >/dev/null 2>&1 || die "vault server not responding on $host -- run '$(basename "$0") -p $DEVBOX_PROFILE vault up'"
+  [ -f "$VAULT_KEYS_FILE" ] || die "no saved keys at $VAULT_KEYS_FILE -- init this box first ('$(basename "$0") -p $DEVBOX_PROFILE vault init')"
+  local unseal; unseal=$(jq -r '.unseal_keys_b64[0]' "$VAULT_KEYS_FILE")
+  [ -n "$unseal" ] && [ "$unseal" != null ] || die "could not read unseal key from $VAULT_KEYS_FILE"
+  local resp
+  resp=$(printf '%s' "$unseal" | win_vault_secret "$host" '
+$ErrorActionPreference="Stop"
+$key = [Console]::In.ReadToEnd().Trim()
+$r = Invoke-RestMethod -UseBasicParsing -Method Put -Uri "http://127.0.0.1:8200/v1/sys/unseal" -Body (@{key=$key} | ConvertTo-Json)
+Write-Output "__VAULTJSON__$($r | ConvertTo-Json -Compress)__ENDVAULTJSON__"
+')
+  [ "$(printf '%s' "$resp" | jq -r '.sealed' 2>/dev/null)" = "false" ] || die "unseal failed (vault still sealed) -- verify the key in $VAULT_KEYS_FILE matches this box"
+  log "vault unsealed."
+}
+
+# win_vault_load PROJ MOUNT HOST -- push a project's secrets (JSON on stdin) into the box's
+# vault at <mount>/<proj>. The JSON (secret values) stays on stdin -> bao kv put stdin; the
+# box-side token comes from C:\ProgramData\devbox\vault.env. proj/mount are validated by caller.
+win_vault_load() {
+  local proj=$1 mount=$2 host=$3 script
+  log "loading secrets -> vault $mount/$proj on $host"
+  # Build the PS script via an interpolating heredoc: bash fills in $mount/$proj, \$ keeps
+  # PowerShell vars literal, and " needs no escaping (heredocs treat it literally).
+  script=$(cat <<EOF
+\$ErrorActionPreference='Stop'
+\$bao='C:\Program Files\OpenBao\bao.exe'
+Get-Content 'C:\ProgramData\devbox\vault.env' -ErrorAction SilentlyContinue | ForEach-Object { if (\$_ -match '^([^=]+)=(.*)\$') { Set-Item "env:\$(\$matches[1])" \$matches[2] } }
+if (-not \$env:BAO_TOKEN) { Write-Output '__VAULTJSON__{"error":"vault not up"}__ENDVAULTJSON__'; exit 1 }
+\$json = [Console]::In.ReadToEnd()
+\$json | & \$bao kv put -mount='$mount' '$proj' - | Out-Null
+if (\$LASTEXITCODE -ne 0) { Write-Output '__VAULTJSON__{"error":"kv put failed"}__ENDVAULTJSON__'; exit 1 }
+Write-Output '__VAULTJSON__{"ok":true}__ENDVAULTJSON__'
+EOF
+)
+  local res; res=$(win_vault_secret "$host" "$script")   # secrets JSON arrives on this fn's stdin
+  printf '%s' "$res" | grep -q '"ok":true' \
+    || die "vault load failed on $host (${res:-no response}) -- is the vault unsealed? (devbox -p $DEVBOX_PROFILE vault unseal)"
+  log "loaded. On the box: bao kv get -mount=$mount $proj"
+}
+
+# win_vault_status -- print the human-readable seal status.
+win_vault_status() {
+  local host; host=$(vault_host)
+  ssh_box "$host" 'exit 0'
+  local stscript; stscript=$(cat <<'PS'
+try { Write-Output "__VAULTJSON__$((Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8200/v1/sys/seal-status').Content)__ENDVAULTJSON__" } catch { Write-Output '__VAULTJSON____ENDVAULTJSON__' }
+PS
+)
+  local s; s=$(printf '%s\n' "$stscript" | win_vault_run "$host")
+  if [ -z "$s" ]; then echo "OpenBao: not running -- run: $(basename "$0") -p $DEVBOX_PROFILE vault up"; return 0; fi
+  echo "OpenBao: running (localhost-only); initialized=$(printf '%s' "$s" | jq -r .initialized) sealed=$(printf '%s' "$s" | jq -r .sealed)"
 }
