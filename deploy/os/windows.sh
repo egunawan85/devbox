@@ -108,10 +108,18 @@ os_install_session_secrets() { log "windows session-secrets materializer not ins
 # Windows is always the Azure provider (spec P1), so run-command + RESOURCE_GROUP here is fine.
 os_install_toolchain() {
   local host=$1 script="$SCRIPT_DIR/azure/toolchain.ps1"
-  need az
+  need az; need perl
   [ -f "$script" ] || die "missing toolchain script: $script"
+  # Guard: a non-ASCII byte (e.g. an em-dash) is read on the box as Windows-1252, where
+  # 0x94 becomes a smart-quote that closes a PowerShell string early and breaks the whole
+  # script. Fail loud here rather than shipping a script that silently won't parse.
+  perl -ne 'exit 1 if /[^\x00-\x7f]/' "$script" || die "toolchain.ps1 contains non-ASCII bytes (they corrupt over run-command) -- make it pure ASCII"
   log "installing project toolchain on $host (VS Build Tools + SQL Express + PS7/Azure CLI; ~20-30 min)"
   az vm run-command invoke -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
     --command-id RunPowerShellScript --scripts "@$script" --query "value[].message" -o tsv \
-    || die "toolchain install (run-command) failed — see C:\\devbox-toolchain.log on the box"
+    || die "toolchain install (run-command) failed -- see C:\\devbox-toolchain.log on the box"
+  # run-command reports success even when the script itself errors, so confirm the marker
+  # provision wrote only on success.
+  ssh_box "$host" 'powershell -NoProfile -Command "if (Test-Path C:\devbox-toolchain-ready) { exit 0 } else { exit 1 }"' \
+    || die "toolchain did not complete (no C:\\devbox-toolchain-ready) -- check C:\\devbox-toolchain.log via '$(basename "$0") -p $DEVBOX_PROFILE ssh'"
 }
