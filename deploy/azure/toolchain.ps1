@@ -28,6 +28,7 @@ try {
     '--quiet','--wait','--norestart','--nocache',
     '--add','Microsoft.VisualStudio.Workload.WebBuildTools',
     '--add','Microsoft.VisualStudio.Workload.ManagedDesktopBuildTools',
+    '--add','Microsoft.VisualStudio.Component.TestTools.BuildTools',
     '--add','Microsoft.Net.Component.4.7.2.TargetingPack',
     '--add','Microsoft.Net.Component.4.6.2.TargetingPack',
     '--includeRecommended'
@@ -36,33 +37,18 @@ try {
   if ($p.ExitCode -notin 0,3010) { throw "VS Build Tools failed: exit $($p.ExitCode)" }
   Write-Output "VS Build Tools exit=$($p.ExitCode) (3010 = reboot pending)"
 
-  # --- SQL Server Express: SQLEngine, mixed-mode + static TCP/1433 (the repos use SQL auth) ---
-  if (-not (Get-Service 'MSSQL$SQLEXPRESS' -ErrorAction SilentlyContinue)) {
-    # Random sa password (the repos use a least-privilege app login, not sa; sa stays unused).
-    $sa = -join (1..28 | ForEach-Object { [char]((65..90)+(97..122)+(48..57) | Get-Random) }) + 'Aa1!'
-    $ssei = Join-Path $env:TEMP 'SQL2022-SSEI-Expr.exe'
-    Invoke-WebRequest -UseBasicParsing -Uri 'https://go.microsoft.com/fwlink/?linkid=2216019' -OutFile $ssei
-    $media = 'C:\SQLEXPR-media'
-    # SSEI /ACTION=Download fetches a self-extracting package (SQLEXPR_x64_ENU.exe); run it
-    # directly with the unattended switches (it extracts and runs setup.exe with them).
-    & $ssei /ACTION=Download /MEDIAPATH=$media /MEDIATYPE=Core /QUIET
-    if ($LASTEXITCODE -ne 0) { throw "SQL Express media download failed: exit $LASTEXITCODE" }
-    $pkg = Get-ChildItem -Path $media -Recurse -Filter 'SQLEXPR*.exe' | Select-Object -First 1
-    if (-not $pkg) { throw ("SQL Express package not found under $media; contents: " + ((Get-ChildItem $media -Recurse -ErrorAction SilentlyContinue | ForEach-Object Name) -join ', ')) }
-    $sqlArgs = "/Q /IACCEPTSQLSERVERLICENSETERMS /ACTION=Install /FEATURES=SQLEngine /INSTANCENAME=SQLEXPRESS /SECURITYMODE=SQL /SAPWD=$sa /TCPENABLED=1 /SQLSYSADMINACCOUNTS=`"BUILTIN\Administrators`""
-    $sp = Start-Process -FilePath $pkg.FullName -ArgumentList $sqlArgs -Wait -PassThru
-    if ($sp.ExitCode -notin 0,3010) { throw "SQL Express install failed: exit $($sp.ExitCode)" }
-    Write-Output "SQL Express installed (mixed-mode)"
-  } else { Write-Output "SQL Express already present -- skipping install" }
-  # Pin TCP to static 1433 (idempotent; runs whether we just installed or it pre-existed). Named
-  # instances default to a dynamic port + SQL Browser, but the repos connect to 127.0.0.1:1433.
-  $inst = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').SQLEXPRESS
-  $tcp = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$inst\MSSQLServer\SuperSocketNetLib\Tcp\IPAll"
-  Set-ItemProperty -Path $tcp -Name TcpDynamicPorts -Value ''
-  Set-ItemProperty -Path $tcp -Name TcpPort -Value '1433'
-  Set-Service 'MSSQL$SQLEXPRESS' -StartupType Automatic
-  Restart-Service 'MSSQL$SQLEXPRESS'
-  Write-Output "SQL Express TCP pinned to static 1433"
+  # --- SQL Server Express LocalDB: the integration tests connect to (localdb)\MSSQLLocalDB ---
+  # (an on-demand, user-mode instance -- no service or TCP port, unlike a full Express instance).
+  if (-not (Get-Command SqlLocalDB.exe -ErrorAction SilentlyContinue)) {
+    & $choco install -y --no-progress sqllocaldb
+    if ($LASTEXITCODE -ne 0) { throw "SQL LocalDB (choco sqllocaldb) install failed: exit $LASTEXITCODE" }
+    $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+    Write-Output "SQL Server Express LocalDB installed"
+  } else { Write-Output "SQL LocalDB already present -- skipping install" }
+  # Ensure the default instance the tests use exists + is started (both idempotent).
+  & SqlLocalDB.exe create MSSQLLocalDB 2>$null
+  & SqlLocalDB.exe start  MSSQLLocalDB 2>$null
+  Write-Output "LocalDB instance MSSQLLocalDB ready -- connect via (localdb)\MSSQLLocalDB"
 
   # Restart sshd so new SSH sessions pick up the updated machine PATH (pwsh/az/sqlcmd were
   # added by MSI after sshd captured its environment at provision time).
