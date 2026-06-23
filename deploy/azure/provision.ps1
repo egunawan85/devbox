@@ -81,6 +81,18 @@ Match Group administrators
   $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
   & npm install -g @anthropic-ai/claude-code
 
+  # --- Make git use the GitHub CLI as its credential helper for github.com (headless-safe) ---
+  # Git for Windows defaults to Git Credential Manager, whose 'wincredman' store needs an
+  # interactive desktop logon and FAILS over a headless SSH session ("Unable to persist
+  # credentials with the 'wincredman' credential store"). Project-repo git auths via `gh` over
+  # HTTPS, so point git's helper at gh now -- the token-less equivalent of `gh auth setup-git`
+  # (the empty value first resets the inherited GCM helper for that host). After the operator
+  # runs `gh auth login`, HTTPS clones work with no GCM/wincredman in the path.
+  foreach ($h in 'https://github.com', 'https://gist.github.com') {
+    & git config --system "credential.$h.helper" ''
+    & git config --system --add "credential.$h.helper" '!gh auth git-credential'
+  }
+
   # --- Apply config and (re)start sshd on the right port ---
   Restart-Service sshd
 
