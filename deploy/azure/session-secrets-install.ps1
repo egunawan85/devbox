@@ -59,7 +59,7 @@ $prev = @()
 if (Test-Path $state) { try { $prev = @(Get-Content $state -Raw | ConvertFrom-Json) } catch {} }
 
 if ($sessions -lt 1) {
-  foreach ($e in $prev) { try { if (Test-Path -LiteralPath $e.dest) { Remove-Item -LiteralPath $e.dest -Force } } catch {} }
+  foreach ($e in $prev) { foreach ($d in @($e.dest)) { try { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Force } } catch {} } }
   if (Test-Path $state) { Remove-Item $state -Force; Log 'wiped (sessions=0)' }
   exit 0
 }
@@ -93,9 +93,14 @@ foreach ($m in $maps) {
     $written | ConvertTo-Json -Compress | Set-Content -LiteralPath $state -Encoding ascii
   } catch { Log ("error " + $m.proj + ": " + $_) }
 }
-# drop any file we wrote before that is no longer in the manifest.
+# Drop any file we previously wrote that is no longer mapped. Robust against a malformed/legacy
+# state entry whose dest is an array: iterate each dest and compare by set membership, so we
+# never Remove-Item an array (that once deleted currently-mapped files) nor a still-mapped dest.
+$currDests = @($maps | ForEach-Object { [string]$_.dest })
 foreach ($e in $prev) {
-  if (-not ($maps | Where-Object { $_.dest -eq $e.dest })) { try { Remove-Item -LiteralPath $e.dest -Force } catch {} }
+  foreach ($d in @($e.dest)) {
+    if ($d -and ($currDests -notcontains $d)) { try { Remove-Item -LiteralPath $d -Force } catch {} }
+  }
 }
 $written | ConvertTo-Json -Compress | Set-Content -LiteralPath $state -Encoding ascii
 Log ("materialized " + $written.Count + "/" + $maps.Count + " (sessions=" + $sessions + ")")
