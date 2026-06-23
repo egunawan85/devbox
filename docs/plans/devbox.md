@@ -7,18 +7,25 @@
 ## Status
 
 - **Phase:** 0 ✅, 1 ✅, 2 ✅ (DigitalOcean, RT-hardened), 2c ✅ (OpenBao **prod** vault,
-  2× external RT). `devbox up` is now **one command** (provision → configure → vault
-  init/unseal → load all secrets), idempotent. All on `main`. Azure/Windows = 2b
-  (**planned 2026-06-22**, see Phase 2b — full Layer A/B/C plan + spec §E amendment; build
-  not started).
-- **Branch:** `main` (all feature branches merged); Windows planning on `worktree-windows-devbox`.
+  2× external RT). `devbox up` is **one command** on both OSes. **Phase 2b ✅ SHIPPED &
+  live-validated (2026-06-23):** Windows/Azure build box — modular profile split, `az`
+  bring-up, `provision.ps1`, push-from-laptop config, full .NET toolchain (MSBuild + SQL
+  Express on 1433), OpenBao as a **Windows Service** (init/unseal/load/status proven on a
+  real box), and the **session-count materializer** (SYSTEM Scheduled Task: 60s + boot +
+  4624/4634; materialize on session, wipe at last logout, byte-exact, clobber-guarded).
+  Each layer was live-de-risked on a real Server 2022 box and torn down. PRs #11/#15 (vault),
+  #16 (materializer); #13 = end-to-end verify + docs + **internal red-team** (3 reviewers →
+  fixed: ProgramData ACL lock, UTF-8 .env, sshd-path session count, atomic write, nssm pin).
+- **Branch:** `main` (Linux + #4–#15 merged); Windows #16/#13 on `worktree-windows-devbox`.
 - **Linux path: live-verified (2026-06-17).** Provision + configure + vault + secrets +
   V1/V2/V4 all confirmed on a real DO box (`178.128.85.201`). One note: `AUTOSEAL_TTL=5min`
   is aggressive for interactive admin (see Phase 2c finding).
-- **Next action:** Build Phase 2b (Windows/Azure) per the now-detailed plan — start with a
-  live de-risk of Layer B (unattended VS Build Tools + SQL Express on a real Server 2022),
-  since the spike is paper-only. Optional Linux follow-up: verify the standalone config-only
-  path (D2) against the same box. Then delete this plan file once Windows ships.
+- **Next action:** Merge #16 + #13. Then **deferred Windows follow-ups** (all optional, none
+  blocking): auto-seal E9 (Scheduled Task; `os_autoseal_arm` is a soft no-op today), and the
+  lower-severity red-team hardenings logged for later — session count by SID + parent-PID (not
+  just OpenSSH image path), pin the remaining `toolchain.ps1` downloads (VS Build Tools / SQL /
+  choco), and reject/quote multi-line secret values in the materialized `.env`. Then delete
+  this plan file.
 - **Blocked on:** nothing for Linux. Windows/Azure deferred. Also pending (operator,
   non-blocking): rename local checkout `claude-configs/` → `devbox/`.
 

@@ -16,6 +16,12 @@ $bao  = Join-Path $dir 'bao.exe'
 $data = 'C:\ProgramData\devbox\openbao-data'
 $cfg  = 'C:\ProgramData\devbox\openbao.hcl'
 New-Item -ItemType Directory -Force -Path $dir, $data, (Split-Path $cfg) | Out-Null
+# Lock C:\ProgramData\devbox down BEFORE any secret is written into it. The default
+# %ProgramData% ACL grants BUILTIN\Users read+create (inherited); without this, the
+# devbox-app token (vault.env), the watchdog script, and the manifest would be readable
+# and the SYSTEM watchdog script replaceable by any non-admin local process. Restrict to
+# SYSTEM + Administrators (full) + eddyg (read), inheritance off so children inherit it.
+icacls (Split-Path $cfg) /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' 'eddyg:(OI)(CI)R' | Out-Null
 
 # --- Install bao.exe (pinned + checksum-verified) if absent ---
 if (-not (Test-Path $bao)) {
@@ -56,7 +62,7 @@ ui            = false
 # --- Register the service via NSSM (wraps the console `bao server` as a Windows Service) ---
 $choco = Join-Path $env:ProgramData 'chocolatey\bin\choco.exe'
 $nssm  = Join-Path $env:ProgramData 'chocolatey\bin\nssm.exe'
-if (-not (Test-Path $nssm)) { & $choco install -y --no-progress nssm | Out-Null }
+if (-not (Test-Path $nssm)) { & $choco install -y --no-progress nssm --version=2.24.101.20180116 | Out-Null }  # pin: NSSM launches bao as SYSTEM
 if (-not (Get-Service devbox-vault -ErrorAction SilentlyContinue)) {
   & $nssm install devbox-vault $bao server "-config=$cfg" | Out-Null
   & $nssm set devbox-vault AppDirectory $dir | Out-Null

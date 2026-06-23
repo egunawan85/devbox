@@ -386,6 +386,7 @@ vault_refresh() {
   fi
   local host; host=$(vault_host)
   log "re-materializing secrets for any active session on $host"
+  [ "$OS" = windows ] && { win_session_refresh "$host"; return; }   # PowerShell path (os/windows.sh)
   ssh_box "$host" 'bash -s' <<'EOF'
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 # No user manager == no live session; secrets materialize fresh on next login.

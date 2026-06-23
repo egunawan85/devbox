@@ -56,6 +56,39 @@ devbox vault status    # initialized / sealed?
 devbox down       # destroy droplet + firewall
 ```
 
+## Windows / Azure (the `windows` profile)
+
+The same CLI provisions a **Windows Server 2022 build box on Azure** for the classic
+.NET-Framework repos (MSBuild + SQL Server Express + the OpenBao vault). Select it with
+`-p windows` (or `DEVBOX_PROFILE=windows`); it reads `targets/windows.conf` instead of
+`devbox.conf`. The Linux profile is unchanged — the two coexist on one laptop.
+
+One-time setup:
+
+1. `az login` once (browser, or `az login --use-device-code`). The subscription is pinned
+   per-profile in `targets/windows.conf` (`SUBSCRIPTION_ID`), so it never depends on the
+   globally-active subscription.
+2. `cp deploy/targets/windows.conf.example deploy/targets/windows.conf` and edit — set
+   `SUBSCRIPTION_ID` and `SSH_PUBKEY_FILES`.
+3. Windows OpenSSH **can't forward your agent**, so project-repo git uses **`gh` over HTTPS**:
+   after the box is up, `devbox -p windows ssh` in and run `gh auth login` once. (The
+   `claude-config` payload is delivered push-from-laptop during `configure` — no key needed.)
+
+```sh
+devbox -p windows up         # create VM + provision + configure + vault up/init + load secrets
+devbox -p windows toolchain  # install the build toolchain (VS Build Tools + SQL Express; ~20-30 min, run once)
+devbox -p windows ssh        # connect (key-only, port 2222; no RDP)
+devbox -p windows vault ...  # same vault subcommands as Linux
+devbox -p windows down       # destroy the VM + NSG + disk
+```
+
+**Secrets on Windows differ from Linux at rest.** Linux materializes app `.env`s to
+tmpfs (RAM); Windows has no tmpfs, so a **SYSTEM Scheduled Task** (60s poll + boot +
+logon/logoff events) materializes them to the **encrypted OS disk** while you have ≥1 SSH
+session and the vault is unsealed, and **wipes them at the last logout** (tracked manifest;
+a pre-existing real file is never touched). There is a ≤60s window after the last logout
+before the wipe fires. See `docs/devbox.spec.md` §E8.
+
 ## Secrets — the on-box vault
 
 App secrets are served by an **OpenBao vault running on the devbox in production mode**,
