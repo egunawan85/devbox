@@ -1,17 +1,14 @@
 # os/windows.sh — Windows Server OS module for the devbox CLI (the 'windows' profile).
 # Implements the OS contract (os_*) that lib/common.sh calls; sourced after common.sh when
-# OS=windows. The contract surface exists now so the windows profile loads and dispatches;
-# each function is filled in by its slice (see docs/plans/devbox.md, Phase 2b):
-#   os_render_firstboot        -> provision.ps1 via Azure Custom Script Extension   (#7)
-#   os_box_ready               -> first-boot readiness probe over SSH               (#7)
-#   os_configure               -> clone/pull + install.ps1 + verify over SSH        (#8, #9)
-#   os_vault_start             -> OpenBao as a Windows service (boots sealed)        (#11)
-#   os_autoseal_arm            -> auto-seal via a Scheduled Task                      (#11)
-#   os_install_session_secrets -> session-count materializer (watchdog + events)     (#12)
+# OS=windows. The functions, roughly in lifecycle order:
+#   os_render_firstboot        -> provision.ps1 via Azure Custom Script Extension
+#   os_box_ready               -> first-boot readiness probe over SSH
+#   os_configure               -> clone/pull + install.ps1 + verify over SSH
+#   os_install_toolchain       -> project build stack (VS Build Tools, LocalDB, NuGet) via run-command
+#   os_vault_start             -> OpenBao as a Windows service (boots sealed)
+#   os_install_session_secrets -> session-count materializer (watchdog + 4624/4634 events)
 #
 # Depends on helpers from common.sh (log/warn/die, ssh_box) — common is sourced first.
-
-_win_todo() { die "windows: $1 is not implemented yet ($2) — see docs/plans/devbox.md Phase 2b"; }
 
 # The Windows first-boot template this module renders. SCRIPT_DIR is set by the entrypoint.
 WIN_TEMPLATE="$SCRIPT_DIR/azure/provision.ps1"

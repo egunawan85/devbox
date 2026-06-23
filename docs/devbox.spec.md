@@ -1,8 +1,7 @@
 # devbox — spec
 
 > The contract: what must be true of a deployed devbox. Source of truth for the
-> feature. Durable. For *why*, see [devbox.overview.md](./devbox.overview.md); for the
-> current build checklist, see [plans/devbox.md](./plans/devbox.md).
+> feature. Durable. For *why*, see [devbox.overview.md](./devbox.overview.md).
 
 Each requirement is observable — you can check whether a given box satisfies it.
 
