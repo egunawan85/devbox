@@ -308,7 +308,9 @@ win_vault_load() {
 \$bao='C:\Program Files\OpenBao\bao.exe'
 Get-Content 'C:\ProgramData\devbox\vault.env' -ErrorAction SilentlyContinue | ForEach-Object { if (\$_ -match '^([^=]+)=(.*)\$') { Set-Item "env:\$(\$matches[1])" \$matches[2] } }
 if (-not \$env:BAO_TOKEN) { Write-Output '__VAULTJSON__{"error":"vault not up"}__ENDVAULTJSON__'; exit 1 }
-\$json = [Console]::In.ReadToEnd()
+\$OutputEncoding = New-Object Text.UTF8Encoding \$false   # encode the pipe to bao as UTF-8
+\$sr = New-Object IO.StreamReader([Console]::OpenStandardInput(), (New-Object Text.UTF8Encoding \$false))
+\$json = \$sr.ReadToEnd()   # read stdin as explicit UTF-8 (console InputEncoding would mangle non-ASCII)
 \$json | & \$bao kv put -mount='$mount' '$proj' - | Out-Null
 if (\$LASTEXITCODE -ne 0) { Write-Output '__VAULTJSON__{"error":"kv put failed"}__ENDVAULTJSON__'; exit 1 }
 Write-Output '__VAULTJSON__{"ok":true}__ENDVAULTJSON__'

@@ -62,7 +62,7 @@ ui            = false
 # --- Register the service via NSSM (wraps the console `bao server` as a Windows Service) ---
 $choco = Join-Path $env:ProgramData 'chocolatey\bin\choco.exe'
 $nssm  = Join-Path $env:ProgramData 'chocolatey\bin\nssm.exe'
-if (-not (Test-Path $nssm)) { & $choco install -y --no-progress nssm --version=2.24 | Out-Null }  # pin: NSSM launches bao as SYSTEM
+if (-not (Test-Path $nssm)) { & $choco install -y --no-progress nssm --version=2.24.101.20180116 | Out-Null }  # pin: NSSM launches bao as SYSTEM
 if (-not (Get-Service devbox-vault -ErrorAction SilentlyContinue)) {
   & $nssm install devbox-vault $bao server "-config=$cfg" | Out-Null
   & $nssm set devbox-vault AppDirectory $dir | Out-Null

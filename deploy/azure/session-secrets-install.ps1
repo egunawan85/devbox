@@ -24,6 +24,7 @@ icacls $dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI
 #    written as-is and only evaluated when the task runs it).
 $watchdog = @'
 $ErrorActionPreference = 'SilentlyContinue'
+try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch {}  # decode bao's UTF-8 JSON faithfully
 $user  = 'eddyg'
 $dir   = 'C:\ProgramData\devbox'
 $map   = Join-Path $dir 'secrets.map'
