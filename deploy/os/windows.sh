@@ -118,8 +118,70 @@ os_vault_start() {
 # a later slice; until then, no-op silently when off and warn (don't die) when a TTL is set so
 # `vault up` still completes.
 os_autoseal_arm() { [ -n "${AUTOSEAL_TTL:-}" ] && log "windows auto-seal (Scheduled Task) not implemented yet (#11) -- ignoring AUTOSEAL_TTL=$AUTOSEAL_TTL"; return 0; }
-# Soft skip (not a hard stop): session-secrets is opt-in, and configure must still complete.
-os_install_session_secrets() { log "windows session-secrets materializer not installed yet (#12) — skipping"; }
+# ---- session secrets (vault -> app .env while an SSH session is live; wiped at last logout) ----
+# Windows analog of the Linux login-time materializer. No tmpfs + no logind here, so a SYSTEM
+# Scheduled Task (60s poll + boot + 4624/4634 logon/logoff events) ref-counts eddyg's live SSH
+# sessions and materializes/wipes each mapped project's .env on the encrypted disk (spec E8
+# Windows clause). Opt-in: only runs when a local secrets.map exists.
+
+# Validate + normalize the manifest -> "<project> <abs-dest>" lines on stdout (Windows paths).
+win_validate_secrets_map() {
+  local f=$1 proj dest rest out=""
+  while read -r proj dest rest; do
+    case "$proj" in ''|\#*) continue ;; esac
+    [ -n "$dest" ] || { echo "secrets.map: project '$proj' has no dest path" >&2; return 1; }
+    case "$proj" in *[!a-zA-Z0-9._-]*) echo "secrets.map: invalid project name '$proj'" >&2; return 1 ;; esac
+    case "$dest" in [A-Za-z]:[/\\]*) ;; *) echo "secrets.map: dest must be an absolute Windows path (C:\\... or C:/...): '$dest'" >&2; return 1 ;; esac
+    case "$dest" in *..*) echo "secrets.map: dest must not contain '..': '$dest'" >&2; return 1 ;; esac
+    out="${out}${proj} ${dest}
+"
+  done < "$f"
+  printf '%s' "$out"
+}
+
+os_install_session_secrets() {
+  local host=$1
+  [ -f "$SECRETS_MAP" ] || { log "no secrets.map at $SECRETS_MAP -- skipping session-secrets (windows)"; return 0; }
+  local clean; clean=$(win_validate_secrets_map "$SECRETS_MAP") || die "invalid $SECRETS_MAP (see above)"
+  [ -n "$clean" ] || { log "secrets.map has no mappings -- skipping session-secrets setup"; return 0; }
+  need az; need perl
+  local script="$SCRIPT_DIR/azure/session-secrets-install.ps1"
+  [ -f "$script" ] || die "missing session-secrets installer: $script"
+  perl -ne 'exit 1 if /[^\x00-\x7f]/' "$script" || die "session-secrets-install.ps1 has non-ASCII bytes -- make it pure ASCII"
+  ssh_box "$host" 'exit 0'
+  log "installing session-secrets watchdog (vault -> .env while logged in; wiped at last logout) on $host"
+  # 1) push the validated manifest to the user profile (writable without admin); data on stdin.
+  local pushscript res
+  pushscript=$(cat <<'PS'
+$d = "C:\Users\eddyg\.devbox"
+New-Item -ItemType Directory -Force -Path $d | Out-Null
+Set-Content -Path (Join-Path $d "secrets.map") -Value ([Console]::In.ReadToEnd()) -Encoding ascii -NoNewline
+Write-Output '__VAULTJSON__{"ok":true}__ENDVAULTJSON__'
+PS
+)
+  res=$(printf '%s\n' "$clean" | win_vault_secret "$host" "$pushscript")
+  printf '%s' "$res" | grep -q '"ok":true' || die "failed to push secrets.map to $host"
+  # 2) install the watchdog + register the SYSTEM Scheduled Task (copies the map into ProgramData).
+  local out json
+  out=$(az vm run-command invoke -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
+    --command-id RunPowerShellScript --scripts "@$script" --query "value[].message" -o tsv 2>&1) \
+    || die "session-secrets install (run-command) failed"
+  json=$(printf '%s' "$out" | tr -d '\r' | sed -n 's/.*__SSJSON__\(.*\)__ENDSSJSON__.*/\1/p')
+  printf '%s' "$json" | grep -q '"ok":true' \
+    || die "session-secrets install did not complete: ${json:-no status} (see C:\\ProgramData\\devbox\\session-secrets.log)"
+  log "session-secrets installed -- materializes on SSH login, wipes at last logout (60s watchdog + logon/logoff events)."
+}
+
+# win_session_refresh HOST -- re-run the watchdog now (materializes for any live session). Used
+# by `vault refresh` after (re)loading secrets, so an open session sees new values immediately.
+win_session_refresh() {
+  local host=$1
+  az vm run-command invoke -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" --command-id RunPowerShellScript \
+    --scripts 'if (Get-ScheduledTask -TaskName devbox-secrets -ErrorAction SilentlyContinue) { Start-ScheduledTask -TaskName devbox-secrets; Start-Sleep 2; Write-Output "ssrefreshed" } else { Write-Output "ssnotinstalled" }' \
+    --query "value[].message" -o tsv 2>&1 | grep -aq 'ssrefreshed' \
+    && echo "devbox-secrets: re-materialized for any active session" \
+    || echo "devbox-secrets: session-secrets not installed (no secrets.map) -- nothing to refresh"
+}
 
 # os_install_toolchain HOST — Layer B: install the project build toolchain (VS Build Tools,
 # SQL Express, NuGet, PS7, Azure CLI, go-sqlcmd) via az run-command (as SYSTEM). Invoked by
