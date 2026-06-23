@@ -1,6 +1,7 @@
-# devbox 'windows' profile — Azure / Windows Server 2022 build-test box.
-# Copy to deploy/targets/windows.conf (gitignored) and edit. Select it with:
-#   devbox -p windows up | configure | ssh | status | down | vault ...
+# devbox 'rg' profile (example) — Azure / Windows Server 2022 build-test box.
+# A profile is a DEPLOYMENT name, not an OS (the OS is the OS= field below) — name it for the
+# box, not the platform. Copy to deploy/targets/<name>.conf (gitignored) and edit; select with:
+#   devbox -p <name> up | configure | ssh | status | down | vault ...
 #
 # Azure auth is interactive: run `az login` once on this machine (browser, or
 # `az login --use-device-code`). The subscription is pinned per-profile below
@@ -30,7 +31,8 @@ TAG=devbox
 # --- Access (key-only SSH on a non-default port; no RDP) ---
 DEVBOX_USER=eddyg
 SSH_PORT=2222
-# Public key(s) authorized for login AND forwarded for outbound git. Space/newline list.
+# Public key(s) authorized to log in. Space/newline list. (Windows OpenSSH can't forward your
+# agent; project-repo git on the box uses `gh` over HTTPS — see the README's Windows section.)
 SSH_PUBKEY_FILES="$HOME/.ssh/id_ed25519.pub"
 
 # --- Config source (cloned on the box during `configure`, via your forwarded key) ---
@@ -40,6 +42,7 @@ REPO_BRANCH=main
 REPO_DIR=C:/Users/eddyg/devbox
 
 # --- Secrets (devbox vault, ported to Windows — Phase 2b Layer C) ---
-# Local plaintext store on your laptop: one <project>.env per project (KEY=value lines).
-SECRETS_DIR="$HOME/devbox-secrets"
+# Sensitive state (your <project>.env files, the session-secrets manifest with C:\... dest
+# paths, and this box's vault unseal key) lives OUTSIDE the repo at ~/.config/devbox/<profile>/.
+# Override SECRETS_DIR / SECRETS_MAP / VAULT_KEYS_FILE here only for a non-default location.
 VAULT_MOUNT=secret

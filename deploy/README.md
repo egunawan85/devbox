@@ -12,12 +12,12 @@ state file** (DigitalOcean itself is the source of truth). Contract:
 | `devbox` | Operator CLI: `up` / `configure` / `ssh` / `status` / `render` / `down`. |
 | `install.sh` | Symlinks `devbox` onto your `PATH` (one-time, so you can run bare `devbox`). |
 | `cloud-init.yaml` | First-boot template: creates the user, hardens SSH, installs the toolchain. |
-| `devbox.conf.example` | Config template — copy to `devbox.conf` (gitignored) and edit. |
+| `targets/*.conf.example` | Per-profile config templates — copy to `targets/<profile>.conf` (gitignored) and edit. |
 
 ## One-time setup
 
 1. `doctl auth init` (or `export DIGITALOCEAN_ACCESS_TOKEN=...`).
-2. `cp deploy/devbox.conf.example deploy/devbox.conf` and edit — set
+2. `cp deploy/targets/default.conf.example deploy/targets/default.conf` and edit — set
    `SSH_PUBKEY_FILES` to your laptop **and** desktop public keys.
 3. Make sure your private key is loaded in your SSH agent (`ssh-add -l`) — the box
    reuses it via agent forwarding for git; nothing is stored on the box.
@@ -30,7 +30,7 @@ state file** (DigitalOcean itself is the source of truth). Contract:
 
    It symlinks `deploy/devbox` into a writable PATH dir (prefers `~/.local/bin`).
    Safe to re-run; `deploy/install.sh --uninstall` removes it. (The CLI resolves the
-   symlink, so it still reads `deploy/devbox.conf` and `deploy/cloud-init.yaml` from
+   symlink, so it still reads `deploy/targets/default.conf` and `deploy/cloud-init.yaml` from
    the repo.)
 
 ## Usage
@@ -50,7 +50,7 @@ devbox status     # show the droplet
 devbox configure  # re-install config only (existing box)
 devbox render     # print the rendered cloud-init — no API calls (safe to inspect)
 devbox vault up        # bring the vault to ready (start + init/unseal as needed)
-devbox vault load myapp # (re)push one project's ~/devbox-secrets/myapp.env
+devbox vault load myapp # (re)push one project's ~/.config/devbox/<profile>/secrets/myapp.env
 devbox vault refresh myapp # load + re-materialize into a live session (no re-login)
 devbox vault status    # initialized / sealed?
 devbox down       # destroy droplet + firewall
@@ -60,29 +60,29 @@ devbox down       # destroy droplet + firewall
 
 The same CLI provisions a **Windows Server 2022 build box on Azure** for the classic
 .NET-Framework repos (MSBuild + SQL Server Express + the OpenBao vault). Select it with
-`-p windows` (or `DEVBOX_PROFILE=windows`); it reads `targets/windows.conf` instead of
-`devbox.conf`. The Linux profile is unchanged — the two coexist on one laptop.
+`-p rg` (or `DEVBOX_PROFILE=rg`); it reads `targets/rg.conf` instead of
+`targets/default.conf`. The default profile is unchanged — the two coexist on one laptop.
 
 One-time setup:
 
 1. `az login` once (browser, or `az login --use-device-code`). The subscription is pinned
-   per-profile in `targets/windows.conf` (`SUBSCRIPTION_ID`), so it never depends on the
+   per-profile in `targets/rg.conf` (`SUBSCRIPTION_ID`), so it never depends on the
    globally-active subscription.
-2. `cp deploy/targets/windows.conf.example deploy/targets/windows.conf` and edit — set
+2. `cp deploy/targets/rg.conf.example deploy/targets/rg.conf` and edit — set
    `SUBSCRIPTION_ID` and `SSH_PUBKEY_FILES`.
 3. Windows OpenSSH **can't forward your agent**, so project-repo git uses **`gh` over HTTPS**:
-   after the box is up, `devbox -p windows ssh` in and run `gh auth login` once. Git is
+   after the box is up, `devbox -p rg ssh` in and run `gh auth login` once. Git is
    pre-wired to use `gh` as its HTTPS credential helper at provision time, so `git clone
    https://github.com/…` works right after — no `gh auth setup-git`, and no Git Credential
    Manager / `wincredman` (which can't persist over a headless SSH session). (The
    `claude-config` payload is delivered push-from-laptop during `configure` — no key needed.)
 
 ```sh
-devbox -p windows up         # create VM + provision + configure + vault up/init + load secrets
-devbox -p windows toolchain  # install the build toolchain (VS Build Tools + SQL Express; ~20-30 min, run once)
-devbox -p windows ssh        # connect (key-only, port 2222; no RDP)
-devbox -p windows vault ...  # same vault subcommands as Linux
-devbox -p windows down       # destroy the VM + NSG + disk
+devbox -p rg up         # create VM + provision + configure + vault up/init + load secrets
+devbox -p rg toolchain  # install the build toolchain (VS Build Tools + SQL Express; ~20-30 min, run once)
+devbox -p rg ssh        # connect (key-only, port 2222; no RDP)
+devbox -p rg vault ...  # same vault subcommands as Linux
+devbox -p rg down       # destroy the VM + NSG + disk
 ```
 
 **Secrets on Windows differ from Linux at rest.** Linux materializes app `.env`s to
@@ -100,10 +100,10 @@ login is the access gate. Storage is a `file` backend — the vault's data is **
 at rest on disk** ("sealed") and unusable until you unseal it with your key.
 
 The durable home for the *values* is your **laptop**: keep one plaintext file per
-project under `~/devbox-secrets/` (the `SECRETS_DIR` in your config):
+project under `~/.config/devbox/<profile>/secrets/` (the `SECRETS_DIR` in your config):
 
 ```
-~/devbox-secrets/myapp.env     # KEY=value lines, edited in your editor
+~/.config/devbox/<profile>/secrets/myapp.env     # KEY=value lines, edited in your editor
 ```
 
 Values are taken **literally** — `KEY=value` stores `value`; `KEY="value"` stores the
@@ -113,7 +113,7 @@ tolerated.
 **`devbox up` already does all of the vault setup** — it brings OpenBao up, runs
 `init` on a fresh box (saving the unseal key + root token to
 `~/.config/devbox/vault-keys.json` on your laptop), unseals, and loads every
-`~/devbox-secrets/*.env`. The individual commands below are only for granular control:
+`~/.config/devbox/<profile>/secrets/*.env`. The individual commands below are only for granular control:
 
 ```sh
 devbox vault up          # start + init/unseal (same readiness as `up`)
@@ -124,7 +124,7 @@ devbox vault refresh myapp  # load myapp (or all, if omitted) + restart the
                             # up the new values without a logout/login
 ```
 
-After editing a `~/devbox-secrets/<proj>.env`, `devbox vault refresh <proj>` pushes
+After editing a `~/.config/devbox/<profile>/secrets/<proj>.env`, `devbox vault refresh <proj>` pushes
 it to the vault and re-materializes the on-tmpfs `.env` in any active login session
 (it restarts `devbox-secrets.service`). With no active session it just loads the
 vault — the secret materializes on the next login. Omit the project name to refresh
@@ -136,7 +136,7 @@ reopens it from your saved key (no re-init). If for some reason the server isn't
 `devbox vault up` starts it and unseals in one step. (Server logs:
 `~/.config/devbox/openbao.log` or `journalctl -u devbox-vault`.)
 
-**Auto-seal TTL (optional).** Set `AUTOSEAL_TTL` (e.g. `5min`) in `devbox.conf` and the
+**Auto-seal TTL (optional).** Set `AUTOSEAL_TTL` (e.g. `5min`) in your profile's conf and the
 vault re-seals that long after each unseal — a hard timer, reset on every `vault unseal`.
 A systemd timer on the box (`devbox-vault-autoseal.timer`) does it, using a **seal-only**
 token (policy `devbox-sealer`, capability `sys/seal` only — it can lock the vault but
@@ -167,11 +167,11 @@ If your app reads a `.env` *file* (rather than env vars), devbox can materialize
 secrets into those files **on SSH login** and wipe them **when your last session ends** —
 keeping plaintext only in RAM (tmpfs), never on the box's disk.
 
-Opt in by creating a manifest (gitignored; copy `deploy/secrets.map.example`) that maps each
-vault project to its destination path on the box. The manifest is **per profile**, since the
-dest paths are OS-specific: the default Linux profile reads `deploy/secrets.map`, and every
-other profile reads `deploy/secrets.<profile>.map` (e.g. `deploy/secrets.windows.map`, with
-`C:\...` paths). Example:
+Opt in by creating a manifest at `~/.config/devbox/<profile>/secrets.map` (copy the format from
+`deploy/secrets.map.example`) that maps each vault project to its destination path on the box.
+It lives in that profile's external home (alongside its `secrets/` and `vault-keys.json`), so
+each deployment has its own — and the dest paths are OS-specific (Linux `/home/...` vs Windows
+`C:\...`). Example (`~/.config/devbox/default/secrets.map`):
 
 ```
 frontend   /home/eddyg/apps/frontend/.env
@@ -257,7 +257,7 @@ exposure of Case-2 file materialization.
   done) and pings for liveness. No response within `LIVENESS_TIMEOUT` (default 240s) ⇒
   bad VM ⇒ it destroys the droplet and recreates on a fresh host (up to
   `PROVISION_ATTEMPTS`, default 2). It also catches a box that dies *mid-install*
-  (`DEATH_STREAK` consecutive missed pings after being alive). Tune via `devbox.conf`;
+  (`DEATH_STREAK` consecutive missed pings after being alive). Tune via your profile's conf;
   set `LIVENESS_PROBE=off` to disable (falls back to the SSH-only `READINESS_TIMEOUT`
   wait). A single dropped ping never triggers a false verdict — liveness needs only one
   success, and "died" needs a sustained streak.

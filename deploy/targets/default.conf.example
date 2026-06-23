@@ -1,7 +1,9 @@
-# devbox deploy config — copy to devbox.conf (gitignored) and edit.
-#   cp deploy/devbox.conf.example deploy/devbox.conf
+# devbox deploy config for the 'default' profile (DigitalOcean / Linux).
+#   cp deploy/targets/default.conf.example deploy/targets/default.conf   # then edit
 #
-# The DigitalOcean API token is NOT stored here. Provide it via doctl
+# A profile names a DEPLOYMENT (its config + provider + OS), run via `devbox -p <profile>`;
+# 'default' is what bare `devbox` uses. Add more boxes as deploy/targets/<name>.conf.
+# The DigitalOcean API token is NOT stored here — provide it via doctl
 # (`doctl auth init`) or the DIGITALOCEAN_ACCESS_TOKEN environment variable.
 
 # --- Droplet ---
@@ -26,8 +28,10 @@ REPO_BRANCH=main
 REPO_DIR=/home/eddyg/devbox
 
 # --- Secrets (devbox vault) ---
-# Local plaintext store on your laptop: one <project>.env per project (KEY=value lines).
-SECRETS_DIR="$HOME/devbox-secrets"
+# Sensitive per-deployment state — your <project>.env files, the session-secrets manifest, and
+# this box's vault unseal key — lives OUTSIDE the repo at ~/.config/devbox/<profile>/, never in
+# the tree. You don't normally set paths here; override SECRETS_DIR / SECRETS_MAP /
+# VAULT_KEYS_FILE only to use a non-default location.
 # KV mount inside the box's OpenBao; a project lands at <mount>/<project>.
 VAULT_MOUNT=secret
 # Optional auto-seal TTL: if set, the vault re-seals this long after each unseal (a hard
