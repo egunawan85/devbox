@@ -164,8 +164,11 @@ If your app reads a `.env` *file* (rather than env vars), devbox can materialize
 secrets into those files **on SSH login** and wipe them **when your last session ends** —
 keeping plaintext only in RAM (tmpfs), never on the box's disk.
 
-Opt in by creating `deploy/secrets.map` (gitignored; copy `deploy/secrets.map.example`)
-that maps each vault project to its destination path on the box:
+Opt in by creating a manifest (gitignored; copy `deploy/secrets.map.example`) that maps each
+vault project to its destination path on the box. The manifest is **per profile**, since the
+dest paths are OS-specific: the default Linux profile reads `deploy/secrets.map`, and every
+other profile reads `deploy/secrets.<profile>.map` (e.g. `deploy/secrets.windows.map`, with
+`C:\...` paths). Example:
 
 ```
 frontend   /home/eddyg/apps/frontend/.env
