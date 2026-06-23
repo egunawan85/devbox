@@ -127,7 +127,7 @@ os_autoseal_arm() { [ -n "${AUTOSEAL_TTL:-}" ] && log "windows auto-seal (Schedu
 # Validate + normalize the manifest -> "<project> <abs-dest>" lines on stdout (Windows paths).
 win_validate_secrets_map() {
   local f=$1 proj dest rest out=""
-  while read -r proj dest rest; do
+  while read -r proj dest rest || [ -n "$proj" ]; do   # || ... = also process a final line with no trailing newline
     case "$proj" in ''|\#*) continue ;; esac
     [ -n "$dest" ] || { echo "secrets.map: project '$proj' has no dest path" >&2; return 1; }
     case "$proj" in *[!a-zA-Z0-9._-]*) echo "secrets.map: invalid project name '$proj'" >&2; return 1 ;; esac
