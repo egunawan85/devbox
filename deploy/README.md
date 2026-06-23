@@ -78,8 +78,8 @@ One-time setup:
    `claude-config` payload is delivered push-from-laptop during `configure` — no key needed.)
 
 ```sh
-devbox -p rg up         # create VM + provision + configure + vault up/init + load secrets
-devbox -p rg toolchain  # install the build toolchain (VS Build Tools + SQL Express; ~20-30 min, run once)
+devbox -p rg up         # create VM + provision + configure + vault + load + toolchain (first up: +~20-30 min for the build stack)
+devbox -p rg toolchain  # (re)install the build toolchain on its own — `up` already runs it once (idempotent via a marker)
 devbox -p rg ssh        # connect (key-only, port 2222; no RDP)
 devbox -p rg vault ...  # same vault subcommands as Linux
 devbox -p rg down       # destroy the VM + NSG + disk
