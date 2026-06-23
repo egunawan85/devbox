@@ -49,7 +49,11 @@ load_conf() {
   # Vault defaults (used by `up` and `vault …`).
   : "${VAULT_MOUNT:=secret}"
   : "${SECRETS_DIR:=$HOME/devbox-secrets}"
-  VAULT_KEYS_FILE="${VAULT_KEYS_FILE:-$HOME/.config/devbox/vault-keys.json}"
+  # Per-BOX keys file (scoped by DROPLET_NAME): the unseal key + root token are unique to each
+  # box, so two devboxes (e.g. linux 'devbox' + windows 'devbox-win') must NOT share one file —
+  # a shared path lets one box's `vault init` silently overwrite the other's key (-> the other
+  # vault becomes unrecoverable). DROPLET_NAME is required (validated above), so it's always set.
+  VAULT_KEYS_FILE="${VAULT_KEYS_FILE:-$HOME/.config/devbox/vault-keys.${DROPLET_NAME}.json}"
   # Optional: session-secrets manifest (maps vault projects -> app .env paths on the box).
   # If present, `configure`/`up` installs the login-time materializer (see os_install_session_secrets).
   SECRETS_MAP="${SECRETS_MAP:-$SCRIPT_DIR/secrets.map}"
