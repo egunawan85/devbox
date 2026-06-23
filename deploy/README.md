@@ -71,7 +71,10 @@ One-time setup:
 2. `cp deploy/targets/windows.conf.example deploy/targets/windows.conf` and edit — set
    `SUBSCRIPTION_ID` and `SSH_PUBKEY_FILES`.
 3. Windows OpenSSH **can't forward your agent**, so project-repo git uses **`gh` over HTTPS**:
-   after the box is up, `devbox -p windows ssh` in and run `gh auth login` once. (The
+   after the box is up, `devbox -p windows ssh` in and run `gh auth login` once. Git is
+   pre-wired to use `gh` as its HTTPS credential helper at provision time, so `git clone
+   https://github.com/…` works right after — no `gh auth setup-git`, and no Git Credential
+   Manager / `wincredman` (which can't persist over a headless SSH session). (The
    `claude-config` payload is delivered push-from-laptop during `configure` — no key needed.)
 
 ```sh
