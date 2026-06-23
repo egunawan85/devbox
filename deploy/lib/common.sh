@@ -56,7 +56,15 @@ load_conf() {
   VAULT_KEYS_FILE="${VAULT_KEYS_FILE:-$HOME/.config/devbox/vault-keys.${DROPLET_NAME}.json}"
   # Optional: session-secrets manifest (maps vault projects -> app .env paths on the box).
   # If present, `configure`/`up` installs the login-time materializer (see os_install_session_secrets).
-  SECRETS_MAP="${SECRETS_MAP:-$SCRIPT_DIR/secrets.map}"
+  # The dest paths are OS-specific (Linux /home/... vs Windows C:\...), so the manifest is
+  # PER-PROFILE: the default 'linux' profile keeps the bare secrets.map (back-compat); every
+  # other profile gets its own secrets.<profile>.map so one profile never validates another's
+  # paths (a shared file made `windows up` choke on a Linux manifest).
+  if [ "$DEVBOX_PROFILE" = linux ]; then
+    SECRETS_MAP="${SECRETS_MAP:-$SCRIPT_DIR/secrets.map}"
+  else
+    SECRETS_MAP="${SECRETS_MAP:-$SCRIPT_DIR/secrets.$DEVBOX_PROFILE.map}"
+  fi
   # Optional: auto-seal TTL. If set (systemd duration, e.g. 5min), the vault re-seals that
   # long after each unseal — a hard timer, reset on every unseal. Empty = off (stay unsealed).
   : "${AUTOSEAL_TTL:=}"
