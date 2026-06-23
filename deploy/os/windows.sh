@@ -280,7 +280,10 @@ try { Write-Output "__VAULTJSON__$((Invoke-RestMethod -UseBasicParsing 'http://1
 PS
 )
   local up; up=$(printf '%s\n' "$upscript" | win_vault_run "$host")
-  printf '%s' "$up" | jq -e '.sealed' >/dev/null 2>&1 || die "vault server not responding on $host -- run '$(basename "$0") -p $DEVBOX_PROFILE vault up'"
+  # Check the server RESPONDED with a seal-status (the 'sealed' key exists), not the truthiness
+  # of .sealed -- `jq -e .sealed` exits 1 when sealed=false, which falsely tripped "not
+  # responding" on an already-unsealed vault.
+  printf '%s' "$up" | jq -e 'has("sealed")' >/dev/null 2>&1 || die "vault server not responding on $host -- run '$(basename "$0") -p $DEVBOX_PROFILE vault up'"
   [ -f "$VAULT_KEYS_FILE" ] || die "no saved keys at $VAULT_KEYS_FILE -- init this box first ('$(basename "$0") -p $DEVBOX_PROFILE vault init')"
   local unseal; unseal=$(jq -r '.unseal_keys_b64[0]' "$VAULT_KEYS_FILE")
   [ -n "$unseal" ] && [ "$unseal" != null ] || die "could not read unseal key from $VAULT_KEYS_FILE"
