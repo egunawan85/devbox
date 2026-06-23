@@ -114,9 +114,10 @@ the lifecycle wrappers (E7–E9) are OS-specific.
   SSH-key auth method of its own; localhost-binding behind SSH is how the SSH key gates
   access.)
 - **E2** The **durable home-of-record** for app secrets is the **operator's machine**,
-  stored **plaintext** in a structured layout (default `~/devbox-secrets/`, perms
-  `700`/`600`). The box's vault is a session-scoped cache loaded from there — secrets
-  are never born on the box and do not survive its teardown.
+  stored **plaintext** in a per-profile layout outside the repo (default
+  `~/.config/devbox/<profile>/secrets/`, perms `700`/`600`). The box's vault is a
+  session-scoped cache loaded from there — secrets are never born on the box, never live
+  in the repo tree, and do not survive its teardown.
 - **E3** Secrets reach the box via **`devbox vault load [path]`**, which pushes the
   plaintext values from the operator's store into the box's OpenBao **over the
   authenticated SSH session**. The box never pulls secrets itself and keeps no durable

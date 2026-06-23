@@ -7,10 +7,11 @@
 # Relies on SCRIPT_DIR being set by the entrypoint before this file is sourced.
 
 # ---- profile + conf resolution ------------------------------------------
-# A profile names a target (its config + provider + OS). Default 'linux' preserves the
-# original single-box behavior: no flag => deploy/devbox.conf. Other profiles read
-# deploy/targets/<profile>.conf. DEVBOX_CONF still overrides the path outright (back-compat).
-DEVBOX_PROFILE="${DEVBOX_PROFILE:-linux}"
+# A profile names a target (a DEPLOYMENT: its config + provider + OS). It's a deployment name,
+# NOT an OS name -- the OS is a field inside the conf (OS=linux|windows). Profile <p> reads
+# deploy/targets/<p>.conf; the default profile is 'default' (bare `devbox` == `-p default`).
+# DEVBOX_CONF overrides the path outright. A legacy deploy/devbox.conf is still honored.
+DEVBOX_PROFILE="${DEVBOX_PROFILE:-default}"
 
 resolve_conf() {
   case "$DEVBOX_PROFILE" in
@@ -18,10 +19,10 @@ resolve_conf() {
   esac
   if [ -n "${DEVBOX_CONF:-}" ]; then
     CONF=$DEVBOX_CONF
-  elif [ "$DEVBOX_PROFILE" = linux ]; then
-    CONF=$SCRIPT_DIR/devbox.conf                 # default profile == original path (back-compat)
   else
     CONF=$SCRIPT_DIR/targets/$DEVBOX_PROFILE.conf
+    # Back-compat: the original single-box layout kept the default conf at deploy/devbox.conf.
+    [ -f "$CONF" ] || { [ "$DEVBOX_PROFILE" = default ] && [ -f "$SCRIPT_DIR/devbox.conf" ] && CONF=$SCRIPT_DIR/devbox.conf; }
   fi
 }
 
@@ -31,7 +32,7 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
 
 load_conf() {
-  [ -f "$CONF" ] || die "no config at $CONF for profile '$DEVBOX_PROFILE' (copy devbox.conf.example to devbox.conf, or add deploy/targets/$DEVBOX_PROFILE.conf)"
+  [ -f "$CONF" ] || die "no config at $CONF for profile '$DEVBOX_PROFILE' (copy deploy/targets/default.conf.example to deploy/targets/$DEVBOX_PROFILE.conf and edit)"
   # shellcheck disable=SC1090
   . "$CONF"
   # Provider/OS for this profile. Defaults keep the original linux profile working with a
@@ -48,23 +49,15 @@ load_conf() {
   case "$DEVBOX_USER" in ''|*[!a-zA-Z0-9_-]*) die "DEVBOX_USER has invalid chars: '$DEVBOX_USER'";; esac
   # Vault defaults (used by `up` and `vault …`).
   : "${VAULT_MOUNT:=secret}"
-  : "${SECRETS_DIR:=$HOME/devbox-secrets}"
-  # Per-BOX keys file (scoped by DROPLET_NAME): the unseal key + root token are unique to each
-  # box, so two devboxes (e.g. linux 'devbox' + windows 'devbox-win') must NOT share one file —
-  # a shared path lets one box's `vault init` silently overwrite the other's key (-> the other
-  # vault becomes unrecoverable). DROPLET_NAME is required (validated above), so it's always set.
-  VAULT_KEYS_FILE="${VAULT_KEYS_FILE:-$HOME/.config/devbox/vault-keys.${DROPLET_NAME}.json}"
-  # Optional: session-secrets manifest (maps vault projects -> app .env paths on the box).
-  # If present, `configure`/`up` installs the login-time materializer (see os_install_session_secrets).
-  # The dest paths are OS-specific (Linux /home/... vs Windows C:\...), so the manifest is
-  # PER-PROFILE: the default 'linux' profile keeps the bare secrets.map (back-compat); every
-  # other profile gets its own secrets.<profile>.map so one profile never validates another's
-  # paths (a shared file made `windows up` choke on a Linux manifest).
-  if [ "$DEVBOX_PROFILE" = linux ]; then
-    SECRETS_MAP="${SECRETS_MAP:-$SCRIPT_DIR/secrets.map}"
-  else
-    SECRETS_MAP="${SECRETS_MAP:-$SCRIPT_DIR/secrets.$DEVBOX_PROFILE.map}"
-  fi
+  # All sensitive per-deployment state lives OUTSIDE the repo, in a per-PROFILE home under
+  # ~/.config/devbox/<profile>/. Rationale: (1) plaintext secrets + unseal keys are never in the
+  # repo tree, so no gitignore gap can leak them; (2) each box gets its own files, so two boxes
+  # never clobber each other's keys or validate each other's (OS-specific) manifest; (3) it's
+  # independent of which checkout you run from. Override any of these in the conf if needed.
+  DEVBOX_HOME="${DEVBOX_HOME:-$HOME/.config/devbox/$DEVBOX_PROFILE}"
+  : "${SECRETS_DIR:=$DEVBOX_HOME/secrets}"          # one <project>.env per project
+  : "${SECRETS_MAP:=$DEVBOX_HOME/secrets.map}"      # session-secrets manifest (OS-specific dests)
+  VAULT_KEYS_FILE="${VAULT_KEYS_FILE:-$DEVBOX_HOME/vault-keys.json}"  # this box's unseal key + root token
   # Optional: auto-seal TTL. If set (systemd duration, e.g. 5min), the vault re-seals that
   # long after each unseal — a hard timer, reset on every unseal. Empty = off (stay unsealed).
   : "${AUTOSEAL_TTL:=}"
