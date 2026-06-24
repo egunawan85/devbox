@@ -77,9 +77,23 @@ Match Group administrators
   Invoke-Expression ((New-Object Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
   $choco = Join-Path $env:ProgramData 'chocolatey\bin\choco.exe'
   & $choco install -y --no-progress git gh nodejs-lts
-  # Refresh PATH so node/npm resolve in this session, then install the Claude Code CLI.
+  # Refresh PATH so node/npm resolve in this session, then install the Claude Code CLI into a
+  # machine-wide npm prefix and put that prefix on the MACHINE PATH. We run as SYSTEM here (Azure
+  # Custom Script Extension), so npm's default global prefix is SYSTEM's per-user %AppData%\npm --
+  # a folder on no PATH a normal login (or the `configure` verify) ever reads, leaving the claude
+  # shim installed but unresolvable. Choco's nodejs-lts doesn't add %AppData%\npm to PATH either,
+  # unlike the official Node MSI. Pinning the prefix to C:\ProgramData\npm and adding it to the
+  # machine PATH mirrors how git/gh/node already resolve (and matches the Linux box, where the
+  # global bin lands in /usr/bin -- system-wide and on PATH by default). The sshd restart below
+  # propagates the new machine PATH to fresh SSH sessions.
   $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
-  & npm install -g @anthropic-ai/claude-code
+  $npmPrefix = Join-Path $env:ProgramData 'npm'
+  New-Item -ItemType Directory -Force -Path $npmPrefix | Out-Null
+  & npm install -g --prefix $npmPrefix @anthropic-ai/claude-code
+  $machPath = [Environment]::GetEnvironmentVariable('Path','Machine')
+  if (($machPath -split ';') -notcontains $npmPrefix) {
+    [Environment]::SetEnvironmentVariable('Path', "$machPath;$npmPrefix", 'Machine')
+  }
 
   # --- Make git use the GitHub CLI as its credential helper for github.com (headless-safe) ---
   # Git for Windows defaults to Git Credential Manager, whose 'wincredman' store needs an
