@@ -1,112 +1,119 @@
 {
-  "attribution": {
-    "commit": ""
-  },
-  "permissions": {
-    "allow": [
-      "Bash",
-      "PowerShell",
-      "Read",
-      "Edit(//**/.git/info/exclude)",
-      "Write(//**/.git/info/exclude)"
-    ],
-    "deny": [
-      "Write(/tmp/**)",
-      "Edit(/tmp/**)",
-      "Write(/var/tmp/**)",
-      "Edit(/var/tmp/**)",
-      "Bash(cd)",
-      "Bash(cd /*)",
-      "Bash(cd ~*)",
-      "Bash(cd ..*)",
-      "Bash(cd -*)",
-      "PowerShell(cd)",
-      "PowerShell(cd /*)",
-      "PowerShell(cd \\*)",
-      "PowerShell(cd *:*)",
-      "PowerShell(cd ~*)",
-      "PowerShell(cd ..*)",
-      "PowerShell(cd -*)",
-      "PowerShell(Set-Location)",
-      "PowerShell(Set-Location /*)",
-      "PowerShell(Set-Location \\*)",
-      "PowerShell(Set-Location *:*)",
-      "PowerShell(Set-Location ~*)",
-      "PowerShell(Set-Location ..*)",
-      "PowerShell(Set-Location -*)",
-      "PowerShell(sl)",
-      "PowerShell(sl /*)",
-      "PowerShell(sl \\*)",
-      "PowerShell(sl *:*)",
-      "PowerShell(sl ~*)",
-      "PowerShell(sl ..*)",
-      "PowerShell(sl -*)",
-      "PowerShell(chdir)",
-      "PowerShell(chdir /*)",
-      "PowerShell(chdir \\*)",
-      "PowerShell(chdir *:*)",
-      "PowerShell(chdir ~*)",
-      "PowerShell(chdir ..*)",
-      "PowerShell(chdir -*)"
-    ],
-    "ask": [
-      "Bash(ssh:*)",
-      "Bash(git pull:*)",
-      "Bash(git fetch:*)",
-      "Bash(git clone:*)",
-      "Bash(git merge:*)",
-      "Bash(git rebase:*)",
-      "Bash(git reset:*)",
-      "Bash(git revert:*)",
-      "Bash(git checkout:*)",
-      "Bash(git switch:*)",
-      "Bash(git restore:*)",
-      "Bash(git rm:*)",
-      "Bash(git mv:*)",
-      "Bash(git apply:*)",
-      "Bash(git am:*)",
-      "Bash(git cherry-pick:*)",
-      "Bash(git clean:*)",
-      "Bash(git stash:*)",
-      "PowerShell(Set-Location:*)",
-      "PowerShell(ssh:*)",
-      "PowerShell(git pull:*)",
-      "PowerShell(git fetch:*)",
-      "PowerShell(git clone:*)",
-      "PowerShell(git merge:*)",
-      "PowerShell(git rebase:*)",
-      "PowerShell(git reset:*)",
-      "PowerShell(git revert:*)",
-      "PowerShell(git checkout:*)",
-      "PowerShell(git switch:*)",
-      "PowerShell(git restore:*)",
-      "PowerShell(git rm:*)",
-      "PowerShell(git mv:*)",
-      "PowerShell(git apply:*)",
-      "PowerShell(git am:*)",
-      "PowerShell(git cherry-pick:*)",
-      "PowerShell(git clean:*)",
-      "PowerShell(git stash:*)"
-    ],
-    "defaultMode": "acceptEdits"
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|PowerShell",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"$HOME/.claude/hooks/git-write-guard.js\"",
-            "shell": "bash",
-            "timeout": 15,
-            "statusMessage": "Checking git write-guard"
-          }
+    "attribution":
+    {
+        "commit": ""
+    },
+    "permissions":
+    {
+        "allow":
+        [
+            "Bash",
+            "PowerShell",
+            "Read",
+            "Edit(//**/.git/info/exclude)",
+            "Write(//**/.git/info/exclude)"
+        ],
+        "deny":
+        [
+            "Write(/tmp/**)",
+            "Edit(/tmp/**)",
+            "Write(/var/tmp/**)",
+            "Edit(/var/tmp/**)",
+            "Bash(cd)",
+            "Bash(cd /*)",
+            "Bash(cd ~*)",
+            "Bash(cd ..*)",
+            "Bash(cd -*)",
+            "PowerShell(cd)",
+            "PowerShell(cd /*)",
+            "PowerShell(cd \\*)",
+            "PowerShell(cd *:*)",
+            "PowerShell(cd ~*)",
+            "PowerShell(cd ..*)",
+            "PowerShell(cd -*)",
+            "PowerShell(Set-Location)",
+            "PowerShell(Set-Location /*)",
+            "PowerShell(Set-Location \\*)",
+            "PowerShell(Set-Location *:*)",
+            "PowerShell(Set-Location ~*)",
+            "PowerShell(Set-Location ..*)",
+            "PowerShell(Set-Location -*)",
+            "PowerShell(sl)",
+            "PowerShell(sl /*)",
+            "PowerShell(sl \\*)",
+            "PowerShell(sl *:*)",
+            "PowerShell(sl ~*)",
+            "PowerShell(sl ..*)",
+            "PowerShell(sl -*)",
+            "PowerShell(chdir)",
+            "PowerShell(chdir /*)",
+            "PowerShell(chdir \\*)",
+            "PowerShell(chdir *:*)",
+            "PowerShell(chdir ~*)",
+            "PowerShell(chdir ..*)",
+            "PowerShell(chdir -*)"
+        ],
+        "ask":
+        [
+            "Bash(ssh:*)",
+            "Bash(git pull:*)",
+            "Bash(git fetch:*)",
+            "Bash(git clone:*)",
+            "Bash(git merge:*)",
+            "Bash(git rebase:*)",
+            "Bash(git reset:*)",
+            "Bash(git revert:*)",
+            "Bash(git checkout:*)",
+            "Bash(git switch:*)",
+            "Bash(git restore:*)",
+            "Bash(git rm:*)",
+            "Bash(git mv:*)",
+            "Bash(git apply:*)",
+            "Bash(git am:*)",
+            "Bash(git cherry-pick:*)",
+            "Bash(git clean:*)",
+            "Bash(git stash:*)",
+            "PowerShell(ssh:*)",
+            "PowerShell(git pull:*)",
+            "PowerShell(git fetch:*)",
+            "PowerShell(git clone:*)",
+            "PowerShell(git merge:*)",
+            "PowerShell(git rebase:*)",
+            "PowerShell(git reset:*)",
+            "PowerShell(git revert:*)",
+            "PowerShell(git checkout:*)",
+            "PowerShell(git switch:*)",
+            "PowerShell(git restore:*)",
+            "PowerShell(git rm:*)",
+            "PowerShell(git mv:*)",
+            "PowerShell(git apply:*)",
+            "PowerShell(git am:*)",
+            "PowerShell(git cherry-pick:*)",
+            "PowerShell(git clean:*)",
+            "PowerShell(git stash:*)"
+        ],
+        "defaultMode": "acceptEdits"
+    },
+    "hooks":
+    {
+        "PreToolUse":
+        [
+            {
+                "matcher": "Bash|PowerShell",
+                "hooks":
+                [
+                    {
+                        "type": "command",
+                        "command": "node \"$HOME/.claude/hooks/git-write-guard.js\"",
+                        "shell": "bash",
+                        "timeout": 15,
+                        "statusMessage": "Checking git write-guard"
+                    }
+                ]
+            }
         ]
-      }
-    ]
-  },
-  "autoUpdatesChannel": "latest",
-  "theme": "dark",
-  "agentPushNotifEnabled": true
+    },
+    "autoUpdatesChannel": "latest",
+    "theme": "dark",
+    "agentPushNotifEnabled": true
 }
