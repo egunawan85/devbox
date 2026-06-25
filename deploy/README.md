@@ -67,7 +67,11 @@ One-time setup:
 
 1. `az login` once (browser, or `az login --use-device-code`). The subscription is pinned
    per-profile in `targets/rg.conf` (`SUBSCRIPTION_ID`), so it never depends on the
-   globally-active subscription.
+   globally-active subscription. If `az login` fails on Windows with `[WinError 5] access
+   denied` (the CLI can't encrypt its token cache via DPAPI — common on Windows Server /
+   Azure VM / service-account profiles), persist the documented workaround before logging
+   in: `[Environment]::SetEnvironmentVariable("AZURE_CORE_ENCRYPT_TOKEN_CACHE","false","User")`,
+   then open a fresh shell and retry. The CLI then stores tokens unencrypted under `~/.azure`.
 2. `cp deploy/targets/rg.conf.example deploy/targets/rg.conf` and edit — set
    `SUBSCRIPTION_ID` and `SSH_PUBKEY_FILES`.
 3. Windows OpenSSH **can't forward your agent**, so project-repo git uses **`gh` over HTTPS**:

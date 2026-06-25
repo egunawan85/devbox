@@ -7,6 +7,10 @@
 # `az login --use-device-code`). The subscription is pinned per-profile below
 # (SUBSCRIPTION_ID); the CLI runs `az account set` so it never depends on whatever
 # subscription happens to be globally active.
+# If `az login` fails on Windows with "[WinError 5] access denied" (DPAPI token-cache
+# encryption — common on Windows Server / Azure VM / service-account profiles), set
+# AZURE_CORE_ENCRYPT_TOKEN_CACHE=false and log in again. The devbox harness already
+# exports that for its own `az` calls; this note is only for the manual `az login`.
 
 PROVIDER=azure
 OS=windows

@@ -10,6 +10,17 @@
 # Status: read-only ops (auth/query/status) are wired; VM/NSG create + destroy land in
 # the next slice (the first `az vm create` is the billable step — gated).
 
+# Azure CLI on some Windows profiles (Windows Server, an Azure VM, or a service-account
+# profile) can't encrypt its token cache with DPAPI and dies with "[WinError 5] access
+# denied" — on `az login` AND on every later `az` call that reads the cache. Disabling
+# token-cache encryption is the documented workaround; tokens then sit unencrypted under
+# ~/.azure, which is acceptable on an operator box that already holds these credentials.
+# Export it here so every `az` the harness runs (this provider + os/windows.sh) inherits
+# it. An operator whose machine encrypts the cache fine can pre-set
+# AZURE_CORE_ENCRYPT_TOKEN_CACHE=true to keep encryption — the ':=' below preserves it.
+: "${AZURE_CORE_ENCRYPT_TOKEN_CACHE:=false}"
+export AZURE_CORE_ENCRYPT_TOKEN_CACHE
+
 # Validate the Azure-specific config this provider needs (the core validates the rest).
 az_require_conf() {
   : "${SUBSCRIPTION_ID:?set SUBSCRIPTION_ID in the windows profile config (deploy/targets/windows.conf)}"
@@ -21,7 +32,9 @@ prov_ready() {
   need az
   az_require_conf
   az account show >/dev/null 2>&1 \
-    || die "az is not logged in — run 'az login' (or 'az login --use-device-code'), then retry"
+    || die "az is not logged in — run 'az login' (or 'az login --use-device-code'), then retry.
+       If login itself fails with '[WinError 5] access denied' (DPAPI token-cache encryption),
+       set AZURE_CORE_ENCRYPT_TOKEN_CACHE=false in your shell, log in again, then re-run."
   az account set --subscription "$SUBSCRIPTION_ID" 2>/dev/null \
     || die "could not select subscription '$SUBSCRIPTION_ID' — check 'az account list'"
 }
