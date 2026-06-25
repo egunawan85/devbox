@@ -85,6 +85,22 @@ Remove-Item "\$env:USERPROFILE\payload.tgz" -Force
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path \$repo 'claude-config\install.ps1')
 exit \$LASTEXITCODE
 EOF
+  # Disable Azure CLI token-cache encryption for the box user. On this Windows Server profile
+  # the CLI can't encrypt its MSAL token cache via DPAPI, so `az login` — which the operator
+  # runs in an SSH session ON the box (RDP is firewalled off) — dies with
+  # "Encryption failed: [WinError 5] ... Consider disable encryption." A User-scope env var
+  # fixes it for every future `az` in that user's sessions (verified: Windows OpenSSH loads
+  # HKCU env per session, so new SSH sessions inherit it) without needing elevation or az to
+  # be installed yet. Idempotent — re-setting the same value is a no-op. Runs every configure,
+  # so it self-heals. Tokens then sit unencrypted under the user's ~/.azure, acceptable on a
+  # single-operator box that already holds these credentials.
+  log "ensuring Azure CLI token-cache encryption is disabled on the box (DPAPI WinError 5 workaround)"
+  win_ps "$host" <<'EOF' || die "windows configure: could not set AZURE_CORE_ENCRYPT_TOKEN_CACHE on the box"
+[Environment]::SetEnvironmentVariable('AZURE_CORE_ENCRYPT_TOKEN_CACHE','false','User')
+$v = [Environment]::GetEnvironmentVariable('AZURE_CORE_ENCRYPT_TOKEN_CACHE','User')
+if ($v -ne 'false') { Write-Output "  FAIL  AZURE_CORE_ENCRYPT_TOKEN_CACHE not set (got '$v')"; exit 1 }
+Write-Output "  ok    AZURE_CORE_ENCRYPT_TOKEN_CACHE=$v (User scope)"
+EOF
   log "verifying toolchain + guard"
   win_ps "$host" <<'EOF' || die "windows configure: verify failed"
 $bad = 0

@@ -10,25 +10,32 @@
 # Status: read-only ops (auth/query/status) are wired; VM/NSG create + destroy land in
 # the next slice (the first `az vm create` is the billable step — gated).
 
-# Azure CLI on some Windows profiles (Windows Server, an Azure VM, or a service-account
-# profile) can't encrypt its token cache with DPAPI and dies with "[WinError 5] access
-# denied" — on `az login` AND on every later `az` call that reads the cache. Disabling
-# token-cache encryption is the documented workaround; tokens then sit unencrypted under
-# ~/.azure, which is acceptable on an operator box that already holds these credentials.
-# Export it here so every `az` the harness runs (this provider + os/windows.sh) inherits
-# it. An operator whose machine encrypts the cache fine can pre-set
-# AZURE_CORE_ENCRYPT_TOKEN_CACHE=true to keep encryption — the ':=' below preserves it.
-: "${AZURE_CORE_ENCRYPT_TOKEN_CACHE:=false}"
-export AZURE_CORE_ENCRYPT_TOKEN_CACHE
+# Azure CLI on a *Windows* operator can't encrypt its token cache with DPAPI and dies with
+# "[WinError 5] access denied" — on `az login` AND on every later `az` call that reads the
+# cache. Disabling token-cache encryption is the documented workaround. We apply it ONLY when
+# the operator's own machine is Windows: a macOS/Linux operator encrypts its cache fine and
+# must NOT have it downgraded (this would rewrite its tokens unencrypted). The Windows *guest*
+# devbox gets the same workaround applied per-user by os/windows.sh:os_configure — that path,
+# not this one, is what fixes `az login` run on the box itself.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) _az_operator_is_windows=1 ;;
+  *)                    _az_operator_is_windows=0 ;;
+esac
+if [ "$_az_operator_is_windows" = 1 ]; then
+  # In-process default for every `az` the harness runs on a Windows operator. An operator who
+  # wants to keep encryption can pre-set AZURE_CORE_ENCRYPT_TOKEN_CACHE=true — ':=' preserves it.
+  : "${AZURE_CORE_ENCRYPT_TOKEN_CACHE:=false}"
+  export AZURE_CORE_ENCRYPT_TOKEN_CACHE
+fi
 
-# az_persist_token_cache_pref — persist the encrypt-token-cache preference into
-# ~/.azure/config so it sticks across shells and covers the operator's *manual* `az login`,
-# not just the harness process that inherits the env var above (the env var alone can't fix
-# a login the operator runs themselves in a fresh shell). `az config set` writes plain text
-# and needs no auth, so this is safe to run before the login check in prov_ready. Idempotent:
-# skips the write when the config already matches, so `devbox up` stays quiet on the steady
-# state. Honors a pre-set AZURE_CORE_ENCRYPT_TOKEN_CACHE=true operator (keeps encryption).
+# az_persist_token_cache_pref — on a Windows operator, persist the encrypt-token-cache
+# preference into ~/.azure/config so it sticks across shells and covers the operator's *manual*
+# `az login`, not just the harness process that inherits the env var above. `az config set`
+# writes plain text and needs no auth, so it's safe before the login check in prov_ready.
+# No-op on a macOS/Linux operator (nothing to work around there). Idempotent: skips the write
+# when the config already matches, so `devbox up` stays quiet on the steady state.
 az_persist_token_cache_pref() {
+  [ "$_az_operator_is_windows" = 1 ] || return 0
   local want=${AZURE_CORE_ENCRYPT_TOKEN_CACHE:-false}
   [ "$(az config get core.encrypt_token_cache --query value -o tsv 2>/dev/null)" = "$want" ] && return 0
   if az config set "core.encrypt_token_cache=$want" -o none 2>/dev/null; then

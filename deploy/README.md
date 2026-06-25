@@ -65,16 +65,23 @@ The same CLI provisions a **Windows Server 2022 build box on Azure** for the cla
 
 One-time setup:
 
-1. `az login` once (browser, or `az login --use-device-code`). The subscription is pinned
-   per-profile in `targets/rg.conf` (`SUBSCRIPTION_ID`), so it never depends on the
-   globally-active subscription. If `az login` fails on Windows with `[WinError 5] access
-   denied` (the CLI can't encrypt its token cache via DPAPI — common on Windows Server /
-   Azure VM / service-account profiles), run `devbox -p windows up` once first: it persists
-   the workaround idempotently into `~/.azure/config` (`az config set
-   core.encrypt_token_cache=false`, no login required), then tells you to retry `az login`,
-   which now succeeds. To do it by hand instead: `az config set core.encrypt_token_cache=false`
-   (or `$env:AZURE_CORE_ENCRYPT_TOKEN_CACHE="false"` for one shell), then log in again. The
-   CLI then stores tokens unencrypted under `~/.azure`.
+1. `az login` once on the **operator** machine (browser, or `az login --use-device-code`). The
+   subscription is pinned per-profile in `targets/rg.conf` (`SUBSCRIPTION_ID`), so it never
+   depends on the globally-active subscription.
+
+   **`[WinError 5]` DPAPI token-cache failure** (the CLI can't encrypt its MSAL token cache and
+   `az login` dies with "Encryption failed: [WinError 5] ... Consider disable encryption") shows
+   up in two places, each handled automatically:
+   - **On the devbox itself** (you `az login` over SSH on the Windows box): `configure`/`up`
+     sets `AZURE_CORE_ENCRYPT_TOKEN_CACHE=false` (User scope) on the box every run, so a fresh
+     SSH session's `az login` just works. Nothing to do — re-run `devbox -p rg up`.
+   - **On a Windows operator machine**: the provider sets the same env var in-process and
+     persists `core.encrypt_token_cache=false` to the operator's `~/.azure/config` before the
+     login check. A macOS/Linux operator is left untouched (it encrypts fine).
+
+   To do it by hand: `az config set core.encrypt_token_cache=false` (or
+   `$env:AZURE_CORE_ENCRYPT_TOKEN_CACHE="false"` for one shell), then log in again. The CLI then
+   stores tokens unencrypted under `~/.azure`.
 2. `cp deploy/targets/rg.conf.example deploy/targets/rg.conf` and edit — set
    `SUBSCRIPTION_ID` and `SSH_PUBKEY_FILES`.
 3. Windows OpenSSH **can't forward your agent**, so project-repo git uses **`gh` over HTTPS**:
