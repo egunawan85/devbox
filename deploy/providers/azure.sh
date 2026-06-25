@@ -21,6 +21,23 @@
 : "${AZURE_CORE_ENCRYPT_TOKEN_CACHE:=false}"
 export AZURE_CORE_ENCRYPT_TOKEN_CACHE
 
+# az_persist_token_cache_pref — persist the encrypt-token-cache preference into
+# ~/.azure/config so it sticks across shells and covers the operator's *manual* `az login`,
+# not just the harness process that inherits the env var above (the env var alone can't fix
+# a login the operator runs themselves in a fresh shell). `az config set` writes plain text
+# and needs no auth, so this is safe to run before the login check in prov_ready. Idempotent:
+# skips the write when the config already matches, so `devbox up` stays quiet on the steady
+# state. Honors a pre-set AZURE_CORE_ENCRYPT_TOKEN_CACHE=true operator (keeps encryption).
+az_persist_token_cache_pref() {
+  local want=${AZURE_CORE_ENCRYPT_TOKEN_CACHE:-false}
+  [ "$(az config get core.encrypt_token_cache --query value -o tsv 2>/dev/null)" = "$want" ] && return 0
+  if az config set "core.encrypt_token_cache=$want" -o none 2>/dev/null; then
+    log "persisted core.encrypt_token_cache=$want in ~/.azure/config (DPAPI WinError 5 workaround)"
+  else
+    warn "could not persist core.encrypt_token_cache=$want; falling back to the env var for harness az calls"
+  fi
+}
+
 # Validate the Azure-specific config this provider needs (the core validates the rest).
 az_require_conf() {
   : "${SUBSCRIPTION_ID:?set SUBSCRIPTION_ID in the windows profile config (deploy/targets/windows.conf)}"
@@ -31,10 +48,11 @@ az_require_conf() {
 prov_ready() {
   need az
   az_require_conf
+  az_persist_token_cache_pref   # write ~/.azure/config before the auth check (needs no login)
   az account show >/dev/null 2>&1 \
-    || die "az is not logged in — run 'az login' (or 'az login --use-device-code'), then retry.
-       If login itself fails with '[WinError 5] access denied' (DPAPI token-cache encryption),
-       set AZURE_CORE_ENCRYPT_TOKEN_CACHE=false in your shell, log in again, then re-run."
+    || die "az is not logged in — run 'az login' (or 'az login --use-device-code'), then re-run.
+       The DPAPI '[WinError 5] access denied' token-cache workaround is already persisted in
+       ~/.azure/config (core.encrypt_token_cache=false), so 'az login' should now succeed."
   az account set --subscription "$SUBSCRIPTION_ID" 2>/dev/null \
     || die "could not select subscription '$SUBSCRIPTION_ID' — check 'az account list'"
 }

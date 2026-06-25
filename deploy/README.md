@@ -69,9 +69,12 @@ One-time setup:
    per-profile in `targets/rg.conf` (`SUBSCRIPTION_ID`), so it never depends on the
    globally-active subscription. If `az login` fails on Windows with `[WinError 5] access
    denied` (the CLI can't encrypt its token cache via DPAPI — common on Windows Server /
-   Azure VM / service-account profiles), persist the documented workaround before logging
-   in: `[Environment]::SetEnvironmentVariable("AZURE_CORE_ENCRYPT_TOKEN_CACHE","false","User")`,
-   then open a fresh shell and retry. The CLI then stores tokens unencrypted under `~/.azure`.
+   Azure VM / service-account profiles), run `devbox -p windows up` once first: it persists
+   the workaround idempotently into `~/.azure/config` (`az config set
+   core.encrypt_token_cache=false`, no login required), then tells you to retry `az login`,
+   which now succeeds. To do it by hand instead: `az config set core.encrypt_token_cache=false`
+   (or `$env:AZURE_CORE_ENCRYPT_TOKEN_CACHE="false"` for one shell), then log in again. The
+   CLI then stores tokens unencrypted under `~/.azure`.
 2. `cp deploy/targets/rg.conf.example deploy/targets/rg.conf` and edit — set
    `SUBSCRIPTION_ID` and `SSH_PUBKEY_FILES`.
 3. Windows OpenSSH **can't forward your agent**, so project-repo git uses **`gh` over HTTPS**:
