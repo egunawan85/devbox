@@ -11,7 +11,7 @@
 // permission flow).
 //
 // Exception: when cwd is inside a worktree under .claude/worktrees/ AND the command's
-// only git write ops are add/commit/push (no wrapper, no other write op), it emits
+// only git write ops are commit/push (no wrapper, no other write op), it emits
 // "allow" instead — a worktree is an isolated feature branch, so committing there can't
 // touch main, and pushing it just publishes that branch for PR review (never a merge).
 // A push that targets main/master still asks, as does any mixed/gated/wrapped command.
@@ -22,16 +22,18 @@
 const fs = require('fs');
 
 // git subcommands that write the repo / working-tree / history or hit the network.
+// `add` (staging only — no history/network) and `fetch` (read-only into refs) are
+// deliberately NOT gated: they flow through the normal allow rule without a prompt.
 const WRITE_SUBS = new Set([
-  'push', 'pull', 'fetch', 'clone', 'merge', 'commit', 'rebase', 'reset',
-  'revert', 'checkout', 'switch', 'restore', 'add', 'rm', 'mv', 'apply', 'am',
+  'push', 'pull', 'clone', 'merge', 'commit', 'rebase', 'reset',
+  'revert', 'checkout', 'switch', 'restore', 'rm', 'mv', 'apply', 'am',
   'cherry-pick', 'clean', 'stash',
 ]);
 
 // Write subcommands that are pre-approved when cwd is inside a git worktree under
-// .claude/worktrees/ — a worktree is on its own isolated feature branch, so add/commit
+// .claude/worktrees/ — a worktree is on its own isolated feature branch, so committing
 // there can't touch main, and pushing that branch only publishes it for PR review.
-const WORKTREE_OK = new Set(['add', 'commit', 'push']);
+const WORKTREE_OK = new Set(['commit', 'push']);
 
 // A push that names main/master as a target bypasses the merge-to-main gate, so it must
 // always ask — even from inside a worktree. Matches `... main`, `... master`, `:main`,
@@ -157,7 +159,7 @@ function main() {
   // Normalize path separators to forward slashes. On Windows the hook's `cwd`
   // (and any `cd` target in the command) is a backslash path, but the
   // worktree-detection regexes below are written with forward slashes. Without
-  // this, a worktree add/commit that auto-allows on macOS/Linux would degrade to
+  // this, a worktree commit that auto-allows on macOS/Linux would degrade to
   // an "ask" on Windows (fails safe, but not identical). Backslashes only ever
   // appear in paths here, so this is lossless for our matching.
   const slash = (p) => p.replace(/\\/g, '/');
@@ -232,14 +234,14 @@ function main() {
   }
 
   // Collect, then decide. A command that mixes a safe op with a gated one (e.g.
-  // `git add . && git push`) or hides intent behind a wrapper must still ask —
-  // we only auto-allow when EVERY detected write op is add/commit and no wrapper
+  // `git commit && git merge`) or hides intent behind a wrapper must still ask —
+  // we only auto-allow when EVERY detected write op is commit/push and no wrapper
   // is involved.
   const gated = [...subs, ...(wrapperSub ? [wrapperSub] : [])];
   if (gated.length === 0) process.exit(0);            // no git write -> defer
 
   // Auto-allow ONLY if: in a worktree, no wrapper obscuring intent, and every
-  // detected write op is add/commit. Otherwise fail closed to "ask".
+  // detected write op is commit/push. Otherwise fail closed to "ask".
   const onlyWorktreeOps = !wrapperSub && subs.length > 0 &&
                           subs.every((s) => WORKTREE_OK.has(s));
   const pushesToMain = subs.includes('push') && PUSH_TO_MAIN.test(cmd);
