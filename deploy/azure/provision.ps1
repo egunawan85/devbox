@@ -89,7 +89,19 @@ Match Group administrators
   $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
   $npmPrefix = Join-Path $env:ProgramData 'npm'
   New-Item -ItemType Directory -Force -Path $npmPrefix | Out-Null
-  & npm install -g --prefix $npmPrefix @anthropic-ai/claude-code
+  # The package's postinstall downloads the native claude.exe into bin/. --foreground-scripts
+  # surfaces it (instead of silently swallowing failures) and --ignore-scripts=false overrides any
+  # inherited ignore-scripts=true that would skip the download outright. A skipped/failed
+  # postinstall leaves the npm shim pointing at a claude.exe that was never fetched, so `claude`
+  # errors with CommandNotFoundException on the missing exe rather than failing the install here.
+  & npm install -g --prefix $npmPrefix @anthropic-ai/claude-code --foreground-scripts --ignore-scripts=false
+  if ($LASTEXITCODE -ne 0) { throw "npm install of @anthropic-ai/claude-code failed (exit $LASTEXITCODE)" }
+  # Assert the native binary the shim execs actually landed -- fail loudly here rather than ship a
+  # half-installed CLI that only breaks at first `claude` invocation.
+  $claudeExe = Join-Path $npmPrefix 'node_modules\@anthropic-ai\claude-code\bin\claude.exe'
+  if (-not (Test-Path $claudeExe)) {
+    throw "Claude CLI install incomplete: $claudeExe is missing (npm shim present but native binary not fetched)."
+  }
   $machPath = [Environment]::GetEnvironmentVariable('Path','Machine')
   if (($machPath -split ';') -notcontains $npmPrefix) {
     [Environment]::SetEnvironmentVariable('Path', "$machPath;$npmPrefix", 'Machine')
