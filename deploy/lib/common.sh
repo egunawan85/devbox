@@ -197,13 +197,52 @@ vault_host() { if [ -n "${VAULT_HOST:-}" ]; then printf '%s' "$VAULT_HOST"; else
 # Convert a KEY=value .env file -> a flat JSON object (handles spaces/`=` in values).
 # Runs on the laptop; jq does the escaping. Robust: lines that aren't a valid
 # `NAME=value` (comments, blanks, junk) are skipped, not errored (capture(...)? ).
+#
+# Pre-pass (awk): collapse a multi-line bash array block
+#     KEY=(
+#       "a"   # inline comments ok
+#       "b"
+#     )
+# into a single physical `KEY=( "a" "b" )` line so the line-based jq capture below
+# stores it as ONE value. The value stays a valid bash-array literal, so it round-trips:
+# the box materializes `KEY=( "a" "b" )` and the app's `source` rebuilds the array.
+# Scalars, comments and blanks pass through untouched. Caveats: an inline `#` is stripped
+# at the first whitespace-preceded `#`, and the first `)` ends the block — so don't put
+# ` #` or a literal `)` inside a quoted array element.
 env_to_json() {
-  command -v jq >/dev/null 2>&1 || die "jq not found on this machine"
-  jq -Rn '
+  command -v jq  >/dev/null 2>&1 || die "jq not found on this machine"
+  command -v awk >/dev/null 2>&1 || die "awk not found on this machine"
+  awk '
+    function trim(s)          { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    function strip_comment(s) { sub(/[[:space:]]+#.*$/, "", s); return s }
+    BEGIN { inarr = 0; buf = "" }
+    {
+      line = $0
+      if (inarr) {                                   # accumulating an open KEY=( ... ) block
+        line = strip_comment(line)
+        if (index(line, ")") > 0) {                  # closing line: keep content before the )
+          sub(/\).*$/, "", line); line = trim(line)
+          if (line != "") buf = buf " " line
+          print buf " )"; inarr = 0; buf = ""
+        } else {
+          line = trim(line)
+          if (line != "") buf = buf " " line
+        }
+        next
+      }
+      if (line ~ /^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*\(/) {
+        s = strip_comment(line)
+        if (index(s, ")") > 0) { print trim(s); next }   # already closed on one line
+        buf = trim(s); inarr = 1; next                   # e.g. "KEY=("  (or with leading elems)
+      }
+      print $0                                       # scalar / comment / blank — verbatim
+    }
+    END { if (inarr) print buf " )" }                # unterminated block: best-effort close
+  ' "$1" | jq -Rn '
     [ inputs
       | capture("^\\s*(?:export\\s+)?(?<k>[A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(?<v>.*?)\\r?$")?
     ] | map({(.k): .v}) | add // {}
-  ' "$1"
+  '
 }
 
 # ---- auto-seal TTL (optional) -----------------------------------------------
