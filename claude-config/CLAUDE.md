@@ -53,6 +53,16 @@ otherwise do work on a repo, follow this workflow:
      rather than locking tests against a design that may
      change — note that tests are pending, or ask me.
 
+   - **Windows-only tests still run — via the appliance.** A
+     test project that targets .NET Framework (net4x) or uses
+     SQL Server LocalDB only runs on Windows — e.g. the
+     `runegate` and `kash-cards` integration/regression suites.
+     On a Linux box that is **not** "not runnable in the
+     environment": run them on the ephemeral Windows box with
+     `/win-test`, and report the real result. Never mark Windows
+     tests passed, skipped-as-unrunnable, or faked without an
+     actual run on the box.
+
 5. **Decide on red-team review.** When the implementation is
    complete, explicitly decide whether the change warrants:
 

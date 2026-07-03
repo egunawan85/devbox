@@ -1,0 +1,70 @@
+# devbox 'win-test' profile (example) — Azure / Windows Server, an EPHEMERAL TEST APPLIANCE.
+#
+# This is not a workspace. Its one job is to run the Windows-only test suites (.NET
+# Framework 4.8 + SQL Server LocalDB) that can't run on the Linux devbox, then deallocate.
+# You never log in to develop on it; you drive it from the Linux box via `/win-test`.
+# See docs/win-test.overview.md (why) and docs/win-test.spec.md (the contract).
+#
+# A profile is a DEPLOYMENT name, not an OS (the OS is the OS= field). Copy to
+# deploy/targets/win-test.conf (gitignored) and edit; select with:
+#   devbox -p win-test up | configure | ssh | status | down
+#
+# Azure auth is interactive: run `az login` once on this machine (browser, or
+# `az login --use-device-code`). The subscription is pinned below (SUBSCRIPTION_ID); the
+# CLI runs `az account set` so it never depends on the globally-active subscription.
+# If `az login` fails on Windows with "[WinError 5] access denied" (DPAPI token-cache
+# encryption), run `devbox up` once: prov_ready persists `core.encrypt_token_cache=false`
+# into ~/.azure/config idempotently. By hand: `az config set core.encrypt_token_cache=false`.
+
+PROVIDER=azure
+OS=windows
+
+# --- Azure target ---
+# SUBSCRIPTION_ID: az account list --query "[?name=='<your sub>'].id" -o tsv
+SUBSCRIPTION_ID=
+RESOURCE_GROUP=win-test-rg
+REGION=southeastasia
+# D4ads_v7 (4 vCPU / 16 GB) — same family as the old box, so it's known-good and has
+# quota here. Burstable B-series was the instinct (idle workload), but it's NOT available
+# on this subscription/region (0 quota + NotAvailableForSubscription) — AND it's moot: the
+# appliance is DEALLOCATED when idle, so we never pay for idle regardless. During the brief
+# run windows we want full throughput (finish, deallocate), which fixed-perf gives outright.
+# 16 GB because the suites peak ~7-8 GB and Windows takes its cut; 8 GB is too tight.
+SIZE=Standard_D4ads_v7
+IMAGE=MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition:latest
+
+# Generic name knobs shared with the common core (DROPLET_NAME is the historical key for
+# "the box"). Named for the ROLE, not the platform.
+DROPLET_NAME=win-test
+FIREWALL_NAME=win-test-nsg
+TAG=win-test
+
+# --- Access (key-only SSH on a non-default port; no RDP) ---
+DEVBOX_USER=eddyg
+SSH_PORT=2222
+SSH_PUBKEY_FILES="$HOME/.ssh/id_ed25519.pub"
+
+# --- Config source (cloned on the box during `configure`) ---
+REPO_URL=git@github.com:egunawan85/devbox.git
+REPO_BRANCH=main
+REPO_DIR=C:/Users/eddyg/devbox
+
+# --- Secrets ---
+# The appliance is CREDENTIAL-FREE for its job: the unit + integration suites are hermetic
+# (LocalDB integrated-auth, in-process TestServer, mocked externals, in-test secret
+# injection). No vault load is needed to run tests. VAULT_MOUNT is kept only so the generic
+# core's vault plumbing has a value; nothing in the test hot path reads it.
+VAULT_MOUNT=secret
+
+# --- Appliance behavior (consumed by the win-test runner + the box idle-monitor) ---
+# These are propagated into ~/.config/devbox/win-test/runner.env by `up` (Slice 1). The
+# runner (claude-config/scripts/win-test.sh) and the box's idle-monitor read them.
+# Where synced worktrees land on the box; kept per-branch for warm incremental rebuilds.
+CI_DIR=C:/ci
+# Self-GC: prune per-branch dirs untouched longer than this, plus any whose remote branch
+# is gone; hard-evict oldest first when free disk drops below CI_MIN_FREE_GB.
+CI_RETAIN_DAYS=14
+CI_MIN_FREE_GB=20
+# Idle-monitor: the box deallocates itself when no test run is active AND it has been idle
+# this long. Doubles as the crash-safety net (stops the box even if a run dies mid-flight).
+IDLE_MINUTES=20

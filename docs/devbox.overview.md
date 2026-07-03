@@ -68,6 +68,10 @@ Two components, one feature:
   out (git remotes, other devboxes it's been granted, package registries).
 - **Ephemeral boxes, durable repo.** Recreating a box from the repo yields the same
   environment.
+- **Two roles: workspace vs appliance.** The Linux box is where I develop (a
+  *workspace*). The Windows box is narrowed to an on-demand **test appliance** — it runs
+  the Windows-only suites and deallocates. I develop on Linux and *call* Windows; I don't
+  live on it. See [win-test.overview.md](./win-test.overview.md).
 - **Self-contained payload.** The entire `~/.claude` mirror — `CLAUDE.md`,
   `settings.json`, `hooks/` — lives under `claude-config/`, so the installer just
   links that one folder onto the box.
