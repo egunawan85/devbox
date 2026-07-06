@@ -92,6 +92,13 @@ Each requirement is observable — you can check whether a given setup satisfies
 The repo scaffolding (profile, runner, command, docs, policy) and the §I2 `runner.env`
 emission (written by `devbox -p win-test up` on the operator box) are authored; the
 operator box's prerequisites (machine SSH identity, Azure CLI — devbox.spec A6/T5) are
-auto-provisioned by its `configure`. §L box-side idle-monitor, §R engine install, and
-§S rsync-on-Windows are wired and verified when the appliance is provisioned and the
-suites run green end-to-end.
+auto-provisioned by its `configure`. The §R engine install — including `rsync`, which
+lives in the toolchain layer and re-converges automatically when `toolchain.ps1` changes
+(the box records the hash of the script that last completed) — and the §S rsync-over-SSH
+sync are **verified end-to-end** on the provisioned appliance: a real `/win-test --suite
+unit` synced the worktree to `C:\ci\<branch>`, built it, ran the unit suite green with
+every test executed, and fetched the TRX back. A project whose TRX shows zero executed
+tests fails the run loud (§X5) — vstest alone exits 0 on that. The §L box-side
+idle-monitor is **not yet implemented** (its inputs — the §C1 run lock and §C2 heartbeat —
+are in place); until it lands, deallocate the box after use
+(`az vm deallocate -g win-test-rg -n win-test`).
