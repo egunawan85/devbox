@@ -90,16 +90,28 @@ done
 
 # --- 3. sync the worktree (warm, incremental) -----------------------------------
 DEST="$CI_DIR/$SAFE_BRANCH"
+# The box's rsync (cwRsync) is cygwin: it reads "C:/ci/…" as a RELATIVE path (prefixing
+# $HOME), so rsync gets the /cygdrive/c/… spelling while PowerShell keeps the C:/… one.
+win2cyg() {
+  case "$1" in
+    [A-Za-z]:*) printf '/cygdrive/%s%s' "$(printf '%.1s' "$1" | tr '[:upper:]' '[:lower:]')" "${1#?:}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+DEST_CYG=$(win2cyg "$DEST")
 if [ "$CLEAN" = 1 ]; then
   echo "win-test: --clean → wiping $DEST on the box"
   "${SSH[@]}" "pwsh -NoProfile -Command \"Remove-Item -Recurse -Force '$DEST' -ErrorAction SilentlyContinue\""
 fi
 echo "win-test: syncing $WORKTREE → $DEST"
+# rsync only creates the LAST path component, so make sure the branch dir (and C:\ci
+# above it) exists before the first sync into it.
+"${SSH[@]}" "pwsh -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$DEST' | Out-Null\""
 # Exclude build output and VCS noise so the delta is small; the box rebuilds bin/obj.
 rsync -az --delete \
   --exclude '.git/' --exclude 'bin/' --exclude 'obj/' --exclude 'tmp/' --exclude 'node_modules/' \
   -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
-  "$WORKTREE/" "$SSH_USER@$SSH_HOST:$DEST/"
+  "$WORKTREE/" "$SSH_USER@$SSH_HOST:$DEST_CYG/"
 
 # --- 4. run the suite on the box (box-side lock serializes concurrent runs) ------
 echo "win-test: running '$SUITE' suite on $VM_NAME…"
@@ -112,7 +124,7 @@ set -e
 mkdir -p ./tmp/win-test
 echo "win-test: fetching results → ./tmp/win-test/"
 rsync -az -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
-  "$SSH_USER@$SSH_HOST:$DEST/tmp/win-test/" "./tmp/win-test/" 2>/dev/null || true
+  "$SSH_USER@$SSH_HOST:$DEST_CYG/tmp/win-test/" "./tmp/win-test/" 2>/dev/null || true
 
 echo
 if [ "$run_rc" = 0 ]; then
