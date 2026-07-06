@@ -35,8 +35,8 @@ die() { echo "win-test: $*" >&2; exit 1; }
 for bin in az ssh rsync git; do
   command -v "$bin" >/dev/null 2>&1 || die "'$bin' not found on PATH"
 done
-# rsync gives warm incremental syncs (only changed files cross the wire) — the box has a
-# matching rsync installed at provision time (spec §R). scp would re-copy everything.
+# rsync gives warm incremental syncs (only changed files cross the wire) — the box gets a
+# matching rsync from its toolchain install (spec §R). scp would re-copy everything.
 
 # --- args -----------------------------------------------------------------------
 WORKTREE=""; SUITE="integration"; CLEAN=0

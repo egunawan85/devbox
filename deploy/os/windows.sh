@@ -197,30 +197,39 @@ win_session_refresh() {
 }
 
 # os_install_toolchain HOST — Layer B: install the project build toolchain (VS Build Tools +
-# Test Tools, SQL Server Express LocalDB, NuGet, PS7, Azure CLI, go-sqlcmd) via az run-command
-# (as SYSTEM). Called by `up` (idempotent — skips once installed) AND the `toolchain` subcommand.
+# Test Tools, SQL Server Express LocalDB, NuGet, PS7, Azure CLI, go-sqlcmd, rsync) via az
+# run-command (as SYSTEM). Called by `up` AND the `toolchain` subcommand. Convergent, not
+# once-only: the box records the sha256 of the toolchain.ps1 that last COMPLETED
+# (C:\devbox-toolchain-rev), and the install is skipped only while the local script hashes the
+# same — so later `up`s stay fast, but editing toolchain.ps1 makes the next `toolchain`/`up`
+# re-apply it. The script's steps are individually idempotent (choco -y, guarded LocalDB, VS
+# installer self-skips), so a re-apply costs minutes, not the full ~20-30 min.
 # Windows is always the Azure provider (spec P1), so run-command + RESOURCE_GROUP here is fine.
 os_install_toolchain() {
-  local host=$1 script="$SCRIPT_DIR/azure/toolchain.ps1"
+  local host=$1 script="$SCRIPT_DIR/azure/toolchain.ps1" want have
   need az; need perl
   [ -f "$script" ] || die "missing toolchain script: $script"
-  # Idempotent: `up` always calls this, but skip the long (~20-30 min) install once the
-  # ready-marker exists — so the first `up` installs it and every later `up` re-converges fast.
-  if ssh_box "$host" 'powershell -NoProfile -Command "if (Test-Path C:\devbox-toolchain-ready) { exit 0 } else { exit 1 }"' 2>/dev/null; then
-    log "project toolchain already present on $host (devbox-toolchain-ready) -- skipping"
+  want=$(perl -MDigest::SHA=sha256_hex -0777 -ne 'print sha256_hex($_)' "$script")
+  have=$(ssh_box "$host" 'powershell -NoProfile -Command "if (Test-Path C:\devbox-toolchain-rev) { Get-Content C:\devbox-toolchain-rev }"' 2>/dev/null | tr -d '[:space:]') || have=""
+  if [ -n "$have" ] && [ "$have" = "$want" ]; then
+    log "project toolchain already at rev ${want:0:12} on $host -- skipping"
     return 0
   fi
   # Guard: a non-ASCII byte (e.g. an em-dash) is read on the box as Windows-1252, where 0x94
   # becomes a smart-quote that closes a PowerShell string early and breaks the whole script.
   perl -ne 'exit 1 if /[^\x00-\x7f]/' "$script" || die "toolchain.ps1 contains non-ASCII bytes (they corrupt over run-command) -- make it pure ASCII"
-  log "installing project toolchain on $host (VS Build Tools + Test Tools + SQL LocalDB + NuGet/PS7/Azure CLI; ~20-30 min)"
+  log "installing project toolchain on $host (VS Build Tools + Test Tools + SQL LocalDB + NuGet/PS7/Azure CLI/rsync; ~20-30 min fresh, minutes to re-converge)"
   az vm run-command invoke -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
     --command-id RunPowerShellScript --scripts "@$script" --query "value[].message" -o tsv \
     || die "toolchain install (run-command) failed -- see C:\\devbox-toolchain.log on the box"
-  # run-command reports success even when the script itself errors, so confirm the marker
-  # provision wrote only on success.
+  # run-command reports success even when the script itself errors, so confirm the ready
+  # marker: toolchain.ps1 deletes it up front and rewrites it only on success, so its
+  # presence reflects THIS run, never a stale earlier one.
   ssh_box "$host" 'powershell -NoProfile -Command "if (Test-Path C:\devbox-toolchain-ready) { exit 0 } else { exit 1 }"' \
     || die "toolchain did not complete (no C:\\devbox-toolchain-ready) -- check C:\\devbox-toolchain.log via '$(basename "$0") -p $DEVBOX_PROFILE ssh'"
+  # Record which script rev completed; the skip above holds until toolchain.ps1 changes.
+  ssh_box "$host" "powershell -NoProfile -Command \"Set-Content -Path C:\devbox-toolchain-rev -Value '$want' -Encoding ascii\"" \
+    || die "could not record toolchain rev on $host"
 }
 
 # ---- vault data path (PowerShell-native; called via OS branch from common.sh) ---------------
