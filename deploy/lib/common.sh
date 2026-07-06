@@ -246,6 +246,8 @@ cmd_up() {
   os_install_toolchain "$ip" # Layer B: project build stack (no-op on linux; windows: ~20-30 min
                              # on a fresh box, skipped while the box's recorded toolchain.ps1
                              # hash matches, re-applied automatically when the script changes)
+  os_install_idle_monitor "$ip" # appliance profiles (IDLE_MINUTES set): identity + deallocate-only
+                                # role + the box's self-deallocation watcher (win-test spec L)
   log "devbox ready — connect: $(basename "$0") ssh"
 }
 
@@ -583,6 +585,7 @@ cmd_toolchain() {
   [ -n "$host" ] || die "no host — pass --host or provision first"
   ssh_box "$host" 'exit 0'   # pin host key before the install
   os_install_toolchain "$host"
+  os_install_idle_monitor "$host"  # appliance profiles (IDLE_MINUTES set) also converge the watcher
   log "toolchain install complete"
 }
 

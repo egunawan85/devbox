@@ -356,3 +356,5 @@ os_install_session_secrets() { install_session_secrets "$1"; }
 # No project toolchain layer for Linux (the DO box's baseline is enough); no-op for the
 # `toolchain` subcommand so it's a clean cross-OS contract.
 os_install_toolchain()       { log "no project toolchain layer for the linux profile — nothing to install"; }
+# The self-deallocation idle-monitor is a Windows-appliance concern (win-test spec L); no-op here.
+os_install_idle_monitor()    { :; }
