@@ -27,7 +27,9 @@
 set -euo pipefail
 
 RUNNER_ENV="${WIN_TEST_RUNNER_ENV:-$HOME/.config/devbox/win-test/runner.env}"
-REMOTE_RUNNER='~/.claude/scripts/win-test-run.ps1'   # installed on the box by install.ps1
+# Installed on the box by install.ps1. Literal $HOME on purpose: the box-side PowerShell
+# expands it; a '~' would reach pwsh -File unexpanded and fail as "not a script file".
+REMOTE_RUNNER='$HOME/.claude/scripts/win-test-run.ps1'
 
 die() { echo "win-test: $*" >&2; exit 1; }
 
