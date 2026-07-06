@@ -27,7 +27,9 @@
 set -euo pipefail
 
 RUNNER_ENV="${WIN_TEST_RUNNER_ENV:-$HOME/.config/devbox/win-test/runner.env}"
-REMOTE_RUNNER='~/.claude/scripts/win-test-run.ps1'   # installed on the box by install.ps1
+# Installed on the box by install.ps1. Literal $HOME on purpose: the box-side PowerShell
+# expands it; a '~' would reach pwsh -File unexpanded and fail as "not a script file".
+REMOTE_RUNNER='$HOME/.claude/scripts/win-test-run.ps1'
 
 die() { echo "win-test: $*" >&2; exit 1; }
 
@@ -35,8 +37,8 @@ die() { echo "win-test: $*" >&2; exit 1; }
 for bin in az ssh rsync git; do
   command -v "$bin" >/dev/null 2>&1 || die "'$bin' not found on PATH"
 done
-# rsync gives warm incremental syncs (only changed files cross the wire) — the box has a
-# matching rsync installed at provision time (spec §R). scp would re-copy everything.
+# rsync gives warm incremental syncs (only changed files cross the wire) — the box gets a
+# matching rsync from its toolchain install (spec §R). scp would re-copy everything.
 
 # --- args -----------------------------------------------------------------------
 WORKTREE=""; SUITE="integration"; CLEAN=0
@@ -90,16 +92,28 @@ done
 
 # --- 3. sync the worktree (warm, incremental) -----------------------------------
 DEST="$CI_DIR/$SAFE_BRANCH"
+# The box's rsync (cwRsync) is cygwin: it reads "C:/ci/…" as a RELATIVE path (prefixing
+# $HOME), so rsync gets the /cygdrive/c/… spelling while PowerShell keeps the C:/… one.
+win2cyg() {
+  case "$1" in
+    [A-Za-z]:*) printf '/cygdrive/%s%s' "$(printf '%.1s' "$1" | tr '[:upper:]' '[:lower:]')" "${1#?:}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+DEST_CYG=$(win2cyg "$DEST")
 if [ "$CLEAN" = 1 ]; then
   echo "win-test: --clean → wiping $DEST on the box"
   "${SSH[@]}" "pwsh -NoProfile -Command \"Remove-Item -Recurse -Force '$DEST' -ErrorAction SilentlyContinue\""
 fi
 echo "win-test: syncing $WORKTREE → $DEST"
+# rsync only creates the LAST path component, so make sure the branch dir (and C:\ci
+# above it) exists before the first sync into it.
+"${SSH[@]}" "pwsh -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$DEST' | Out-Null\""
 # Exclude build output and VCS noise so the delta is small; the box rebuilds bin/obj.
 rsync -az --delete \
   --exclude '.git/' --exclude 'bin/' --exclude 'obj/' --exclude 'tmp/' --exclude 'node_modules/' \
   -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
-  "$WORKTREE/" "$SSH_USER@$SSH_HOST:$DEST/"
+  "$WORKTREE/" "$SSH_USER@$SSH_HOST:$DEST_CYG/"
 
 # --- 4. run the suite on the box (box-side lock serializes concurrent runs) ------
 echo "win-test: running '$SUITE' suite on $VM_NAME…"
@@ -112,7 +126,7 @@ set -e
 mkdir -p ./tmp/win-test
 echo "win-test: fetching results → ./tmp/win-test/"
 rsync -az -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
-  "$SSH_USER@$SSH_HOST:$DEST/tmp/win-test/" "./tmp/win-test/" 2>/dev/null || true
+  "$SSH_USER@$SSH_HOST:$DEST_CYG/tmp/win-test/" "./tmp/win-test/" 2>/dev/null || true
 
 echo
 if [ "$run_rc" = 0 ]; then

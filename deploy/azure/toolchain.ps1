@@ -4,7 +4,8 @@
 # at first boot, to keep provision.ps1 small and because these installs are long (VS Build
 # Tools alone is ~20 min). Installs the classic .NET Framework build stack the repos need:
 # VS 2022 Build Tools (Web workload + FW 4.7.2/4.6.2 targeting packs), NuGet CLI, SQL Server
-# Express (mixed-mode + TCP, for the repos' SQL auth), PowerShell 7, Azure CLI, go-sqlcmd.
+# Express (mixed-mode + TCP, for the repos' SQL auth), PowerShell 7, Azure CLI, go-sqlcmd,
+# rsync (the receive end of the win-test per-run source sync).
 #
 # winget is absent on Windows Server 2022, so this uses Chocolatey (installed by
 # provision.ps1) + direct vendor installers. Idempotent where the installers allow.
@@ -17,11 +18,27 @@ try {
   $choco = Join-Path $env:ProgramData 'chocolatey\bin\choco.exe'
   if (-not (Test-Path $choco)) { throw "Chocolatey not found ($choco) -- run provision.ps1 first" }
 
-  # --- PowerShell 7, Azure CLI, go-sqlcmd, NuGet CLI, VC++ runtime (Chocolatey) ---
+  # Fresh-run signal: clear prior completion markers so the CLI's post-run check (and the rev
+  # it records, see os_install_toolchain) can only reflect THIS run, never a stale success.
+  Remove-Item -Path 'C:\devbox-toolchain-ready','C:\devbox-toolchain-rev' -Force -ErrorAction SilentlyContinue
+
+  # --- PowerShell 7, Azure CLI, go-sqlcmd, NuGet CLI, VC++ runtime, rsync (Chocolatey) ---
   # vcredist140 = the VS2015-2022 VC++ runtime; required by the SQL LocalDB engine (sqlservr.exe
   # won't start without it -- it was the missing piece when LocalDB was installed by hand).
-  & $choco install -y --no-progress powershell-core azure-cli sqlcmd nuget.commandline vcredist140
+  # rsync (cwRsync) is the receive end of the win-test source sync (win-test.spec S1): the Linux
+  # runner's rsync-over-SSH spawns `rsync --server` here through the box's default PowerShell
+  # shell, so rsync.exe must resolve on the MACHINE PATH of a fresh non-interactive SSH session.
+  # The choco shim dir (ProgramData\chocolatey\bin) is already on that PATH; the sshd restart
+  # below propagates it to new sessions.
+  & $choco install -y --no-progress powershell-core azure-cli sqlcmd nuget.commandline vcredist140 rsync
   if ($LASTEXITCODE -ne 0) { throw "choco toolchain install failed: exit $LASTEXITCODE" }
+  # Fail loud NOW (not at the first /win-test sync) if the rsync shim didn't land or can't run.
+  # Capture output in full, THEN truncate: piping a native command into Select-Object -First
+  # kills its pipe mid-write, which fails rsync (exit -1) even when it works.
+  $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+  $rsyncVer = & rsync --version 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "rsync installed but does not run: exit $LASTEXITCODE" }
+  Write-Output ($rsyncVer | Select-Object -First 1)
 
   # --- VS 2022 Build Tools: Web workload + .NET FW targeting packs (verified recipe) ---
   $bt = Join-Path $env:TEMP 'vs_buildtools.exe'

@@ -243,8 +243,9 @@ cmd_up() {
   VAULT_HOST="$ip"            # reuse this IP for the vault steps (no extra lookups)
   vault_bringup              # start OpenBao + init/unseal as needed
   vault_load_all             # push every ~/devbox-secrets/<proj>.env
-  os_install_toolchain "$ip" # Layer B: project build stack (no-op on linux; windows installs it
-                             # once — ~20-30 min on a fresh box, skipped on re-runs via its marker)
+  os_install_toolchain "$ip" # Layer B: project build stack (no-op on linux; windows: ~20-30 min
+                             # on a fresh box, skipped while the box's recorded toolchain.ps1
+                             # hash matches, re-applied automatically when the script changes)
   log "devbox ready — connect: $(basename "$0") ssh"
 }
 

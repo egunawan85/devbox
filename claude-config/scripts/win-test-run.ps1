@@ -16,7 +16,9 @@
        <RepoDir>/tmp/win-test/ (win-test.sh rsyncs that back).
     4. Release the lock, bump the heartbeat, and garbage-collect stale per-branch dirs.
 
-  Exit code mirrors `dotnet test` (0 = all passed).
+  Exit code mirrors `dotnet test` (0 = all passed), except that a project which executes
+  zero tests fails the run — vstest exits 0 on "no tests found", which would otherwise be
+  a silent pass (spec §X5).
 
 .PARAMETER RepoDir   The synced worktree on the box, e.g. C:\ci\my-branch.
 .PARAMETER Suite     unit | integration | smoke | all  (default: integration)
@@ -98,14 +100,29 @@ try {
               Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' -and $_.Name -notmatch '\.Tests\.E2E\.' }
   if (-not $projects) { throw "win-test-run: no test projects matched '$pattern' under $RepoDir" }
 
+  # Classic packages.config projects keep their VSTest adapter (e.g. xunit.runner.visualstudio)
+  # in the repo-local packages dir, which dotnet test does not probe by default — without it
+  # discovery finds ZERO tests and still exits 0. Hand vstest every restored adapter dir.
+  $adapterArgs = @()
+  Get-ChildItem -Path (Join-Path $RepoDir 'packages') -Recurse -Filter '*testadapter.dll' -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty DirectoryName -Unique |
+    ForEach-Object { $adapterArgs += @('--test-adapter-path', $_) }
+
   $failed = 0
   foreach ($p in $projects) {
     $name = [IO.Path]::GetFileNameWithoutExtension($p.Name)
     Write-Host "win-test-run: dotnet test $name"
-    & dotnet test $p.FullName --no-build --no-restore --nologo `
+    & dotnet test $p.FullName --no-build --no-restore --nologo @adapterArgs `
         --logger "trx;LogFileName=$name.trx" --results-directory $results `
         *>&1 | Tee-Object -FilePath (Join-Path $results "$name.log") -Append
-    if ($LASTEXITCODE -ne 0) { $failed++ }
+    $rcTest = $LASTEXITCODE
+    # A project that discovers/executes zero tests must FAIL the run (spec §X5: a run that
+    # could not execute is a loud failure, never a silent pass) — vstest exits 0 for it.
+    $executed = 0
+    $trx = Join-Path $results "$name.trx"
+    if (Test-Path $trx) { $executed = [int]([xml](Get-Content $trx)).TestRun.ResultSummary.Counters.executed }
+    if ($rcTest -ne 0) { $failed++ }
+    elseif ($executed -eq 0) { Write-Host "win-test-run: $name executed ZERO tests — failing loud (spec X5)"; $failed++ }
     Touch-Heartbeat
   }
 
