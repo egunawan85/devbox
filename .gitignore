@@ -12,8 +12,9 @@ deploy/targets/*.conf
 deploy/secrets.map
 deploy/secrets.*.map
 
-# Local Claude session overrides.
-.claude/settings.local.json
+# Local Claude state — session overrides, task worktrees. The shareable payload
+# lives in claude-config/, never here.
+.claude/
 
 # In-tree scratch space for agents (verification / throwaway files).
 # Scratch goes in ./tmp/, never /tmp or /var/tmp — see claude-config/CLAUDE.md.
