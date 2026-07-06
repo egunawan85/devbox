@@ -249,10 +249,47 @@ EOF
   log "auto-seal armed — vault re-seals ${AUTOSEAL_TTL} after unseal (timer reset now)"
 }
 
-# os_configure HOST — clone/pull the repo over the forwarded agent, install the config,
-# and verify the toolchain + guard. The host-key pin happens in common before this call.
+# ---- machine identity (box-to-box SSH — spec A6) ----------------------------
+# Every Linux box gets its OWN resident ed25519 keypair at ~/.ssh/id_ed25519: the box is
+# the SSH *client* that drives other deployments (e.g. the win-test appliance), and an
+# unattended run — a scheduled /win-test with no human logged in — has no forwarded agent
+# to lean on. The key is generated ON the box (never a copy of a device key) and has NO
+# passphrase (an unattended client has no keychain/human to unlock one); the compensating
+# controls are scope + revocability — it grants only what explicitly authorizes its
+# pubkey, and removing that pubkey from a target's authorized_keys revokes it.
+# Idempotent (D3): generate only if absent; NEVER overwrite an existing key; re-derive a
+# missing .pub from the private half. Lives in configure (not cloud-init) so both a
+# fresh box (`up` runs configure) and an already-deployed box (its next configure/up)
+# converge on it from one implementation.
+ensure_machine_identity() {
+  local host=$1
+  log "ensuring machine SSH identity on $host (~/.ssh/id_ed25519)"
+  ssh_box "$host" 'bash -s' <<'EOF'
+set -eu
+umask 077
+mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+key="$HOME/.ssh/id_ed25519"
+if [ ! -f "$key" ]; then
+  ssh-keygen -q -t ed25519 -N '' -f "$key" -C "devbox-machine@$(hostname)"
+  echo "machine-identity: generated $key (ed25519, no passphrase)"
+elif [ ! -f "$key.pub" ]; then
+  # -P '' supplies the (empty) passphrase non-interactively; a passphrase-protected
+  # private key fails loudly here instead of hanging on a prompt.
+  ssh-keygen -y -P '' -f "$key" > "$key.pub"
+  echo "machine-identity: re-derived $key.pub from the existing private key"
+else
+  echo "machine-identity: $key already present -- leaving it untouched"
+fi
+chmod 600 "$key"; chmod 644 "$key.pub"   # assert perms even if the files pre-existed
+EOF
+}
+
+# os_configure HOST — ensure the machine identity, clone/pull the repo over the forwarded
+# agent, install the config, and verify the toolchain + guard. The host-key pin happens
+# in common before this call.
 os_configure() {
   local host=$1
+  ensure_machine_identity "$host"
   ssh -A -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
       "$DEVBOX_USER@$host" "bash -s" <<EOF
 set -euo pipefail

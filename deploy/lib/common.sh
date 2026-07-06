@@ -22,7 +22,10 @@ resolve_conf() {
   else
     CONF=$SCRIPT_DIR/targets/$DEVBOX_PROFILE.conf
     # Back-compat: the original single-box layout kept the default conf at deploy/devbox.conf.
-    [ -f "$CONF" ] || { [ "$DEVBOX_PROFILE" = default ] && [ -f "$SCRIPT_DIR/devbox.conf" ] && CONF=$SCRIPT_DIR/devbox.conf; }
+    # Trailing `|| true`: when NEITHER conf exists this && chain returns 1, and under set -e
+    # that killed the whole CLI here — before load_conf could print its actionable "no config
+    # at ..." message (and even `devbox help` died silently on a fresh clone).
+    [ -f "$CONF" ] || { [ "$DEVBOX_PROFILE" = default ] && [ -f "$SCRIPT_DIR/devbox.conf" ] && CONF=$SCRIPT_DIR/devbox.conf; } || true
   fi
 }
 
@@ -130,10 +133,69 @@ cmd_down() {
   prov_destroy "$ip"
 }
 
+# ---- preflight (operator-side prerequisites) --------------------------------
+# Loud, actionable check of the operator's SSH key material BEFORE any provider call.
+# The files in SSH_PUBKEY_FILES authorize login on the box; on a devbox operator (e.g.
+# the Linux box standing up win-test) the default ~/.ssh/id_ed25519.pub is the box's
+# machine identity, auto-provisioned by `configure` (os/linux.sh, spec A6). Without this
+# check a missing key fails late inside the first-boot render — or not at all when the
+# box already exists, leaving an appliance no unattended run can log in to.
+# The provider-CLI leg (az/doctl on PATH + logged in) is NOT here: prov_ready already
+# does it, and every mutating subcommand runs prov_ready.
+preflight_identity() {
+  local f
+  for f in $SSH_PUBKEY_FILES; do
+    [ -f "$f" ] || die "no SSH public key at $f (SSH_PUBKEY_FILES in $CONF).
+       On a devbox this is auto-provisioned by 'devbox configure' run against it; create it by hand with:
+         ssh-keygen -t ed25519 -N '' -f ${f%.pub}
+       Then re-run. ('$(basename "$0") -p $DEVBOX_PROFILE doctor' checks all operator prereqs.)"
+  done
+}
+
+# `devbox doctor` — check the operator-side prerequisites and report ok/FAIL lines (same
+# style as the configure verify). Covers: the machine identity / pubkeys (unattended runs
+# need a RESIDENT private key — an agent only helps interactive use), and the provider
+# CLI + auth (via prov_ready, the existing dependency check). Touches no box and creates
+# nothing; prov_ready itself may pin the subscription / persist its auth workaround, both
+# idempotent (same as `status`). Exits non-zero if anything FAILs.
+cmd_doctor() {
+  load_conf
+  local bad=0 f priv resident=0
+  echo "doctor: profile '$DEVBOX_PROFILE' ($PROVIDER/$OS) — conf $CONF"
+  for f in $SSH_PUBKEY_FILES; do
+    if [ -f "$f" ]; then
+      echo "  ok    pubkey $f"
+    else
+      echo "  FAIL  pubkey $f missing — auto-provisioned on a devbox by 'devbox configure'; by hand: ssh-keygen -t ed25519 -N '' -f ${f%.pub}"
+      bad=$((bad+1))
+    fi
+    priv=${f%.pub}
+    [ "$priv" != "$f" ] && [ -f "$priv" ] && resident=1
+  done
+  if [ "$resident" = 1 ]; then
+    echo "  ok    resident private key (unattended SSH to other deployments will work)"
+  elif ssh-add -l >/dev/null 2>&1; then
+    echo "  warn  no resident private key; the ssh-agent has identities, so interactive use works — UNATTENDED runs will fail"
+  else
+    echo "  FAIL  no resident private key and no agent identities — this machine can't SSH anywhere; create one: ssh-keygen -t ed25519 -N '' -f \$HOME/.ssh/id_ed25519"
+    bad=$((bad+1))
+  fi
+  # Subshell: prov_ready die()s on failure (its message lands on stderr above our verdict).
+  if (prov_ready); then
+    echo "  ok    provider CLI + auth ($PROVIDER)"
+  else
+    echo "  FAIL  provider CLI/auth ($PROVIDER) — see the error above"
+    bad=$((bad+1))
+  fi
+  [ "$bad" -eq 0 ] && echo "doctor: all checks passed" || { echo "doctor: $bad check(s) failed"; exit 1; }
+}
+
 # One command, end to end: provision (if absent) -> configure -> vault ready -> load all
 # ~/devbox-secrets/<proj>.env. Idempotent: re-running an existing box re-converges.
 cmd_up() {
-  load_conf; prov_ready
+  load_conf
+  preflight_identity   # fail loud + early on missing key material, before any provider call
+  prov_ready
   local ip
   if [ -n "$(prov_exists)" ]; then
     ip=$(prov_wait_ip) || die "box '$DROPLET_NAME' exists but has no public IP yet — wait a moment and re-run (NOT creating a duplicate)"
@@ -489,7 +551,7 @@ cmd_toolchain() {
   log "toolchain install complete"
 }
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
   # Global flags before the subcommand: -p/--profile selects the target (default 'linux').
@@ -509,6 +571,7 @@ main() {
     ssh)       cmd_ssh "$@" ;;
     status)    cmd_status "$@" ;;
     render)    cmd_render "$@" ;;
+    doctor)    cmd_doctor "$@" ;;
     toolchain) cmd_toolchain "$@" ;;
     vault)     cmd_vault "$@" ;;
     down)      cmd_down "$@" ;;
