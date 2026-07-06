@@ -108,6 +108,14 @@ Each requirement is observable — you can check whether a given box satisfies i
 - **T3** Baseline language runtime(s) for my typical work are present. _Default:
   Node.js LTS. Extend as needed._
 - **T4** The Claude Code CLI can authenticate. _Mechanism open — see questions._
+- **T5** **Operator tooling for peer deployments.** A Linux box carries the provider
+  CLI(s) it needs to *operate other devbox deployments* it's been granted — today the
+  **Azure CLI** (`az`), which the win-test runner uses per run (`az vm start`) and
+  `devbox -p win-test up` uses to provision. Installed idempotently by `configure`
+  (Microsoft apt repo, keyring over TLS); **`az login` stays interactive** — the box
+  holds only az's own revocable token cache after the operator logs in, consistent with
+  [E6]. For appliance profiles, `up` also writes the runner contract
+  (`~/.config/devbox/<profile>/runner.env` — see win-test.spec I2) on the operator box.
 
 ## E — Environment & secrets
 

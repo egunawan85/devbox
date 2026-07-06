@@ -89,7 +89,9 @@ Each requirement is observable — you can check whether a given setup satisfies
 
 ## Status
 
-Slice 0 (this repo scaffolding — profile, runner, command, docs, policy) is authored;
-§L box-side idle-monitor, §R engine install, §S rsync-on-Windows, and the §I2 `runner.env`
-emission are wired and verified when the box is provisioned (Slice 1) and the suites run
-green end-to-end (Slice 2).
+The repo scaffolding (profile, runner, command, docs, policy) and the §I2 `runner.env`
+emission (written by `devbox -p win-test up` on the operator box) are authored; the
+operator box's prerequisites (machine SSH identity, Azure CLI — devbox.spec A6/T5) are
+auto-provisioned by its `configure`. §L box-side idle-monitor, §R engine install, and
+§S rsync-on-Windows are wired and verified when the appliance is provisioned and the
+suites run green end-to-end.
