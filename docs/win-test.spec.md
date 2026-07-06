@@ -99,6 +99,12 @@ sync are **verified end-to-end** on the provisioned appliance: a real `/win-test
 unit` synced the worktree to `C:\ci\<branch>`, built it, ran the unit suite green with
 every test executed, and fetched the TRX back. A project whose TRX shows zero executed
 tests fails the run loud (§X5) — vstest alone exits 0 on that. The §L box-side
-idle-monitor is **not yet implemented** (its inputs — the §C1 run lock and §C2 heartbeat —
-are in place); until it lands, deallocate the box after use
-(`az vm deallocate -g win-test-rg -n win-test`).
+idle-monitor is **implemented and verified live**: a SYSTEM scheduled task (every 5 min)
+probes the §C1 lock for a *live holder* (an exclusive-open test, so a lock file leaked by
+a hard-killed run is cleaned up instead of pinning the box — §L4) and measures idleness
+from the newer of the §C2 heartbeat and the OS boot time, then deallocates via the VM's
+managed identity (a custom role with only the `deallocate` action, scoped to this VM).
+Verified on the appliance: held lock blocks deallocation, stale lock is removed, boot
+grace holds, and an untouched box self-deallocated after a real `/win-test` run with no
+manual step. Installed by `up`/`toolchain` for profiles that set `IDLE_MINUTES`
+(hash-converged like the toolchain, so script or `IDLE_MINUTES` changes re-apply).
