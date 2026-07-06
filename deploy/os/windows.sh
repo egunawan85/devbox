@@ -232,6 +232,79 @@ os_install_toolchain() {
     || die "could not record toolchain rev on $host"
 }
 
+# os_install_idle_monitor HOST — the appliance's self-deallocation watcher (win-test spec
+# L3/L4). Only for profiles that OPT IN by setting IDLE_MINUTES in their conf — a workspace
+# box must never turn itself off. Called by `up` AND the `toolchain` subcommand.
+# Three idempotent layers, re-ensured on every call:
+#   1. a system-assigned managed identity on the VM — how the box calls ARM to deallocate
+#      itself with no credential stored on it (the watcher gets tokens from IMDS);
+#   2. the single-action custom role devbox-self-deallocator (deallocate, nothing else),
+#      scoped to THIS VM only and granted to that identity — a compromised box can turn
+#      itself off, and that is all;
+#   3. the box-side watcher + its 5-min scheduled task (deploy/azure/idle-monitor.ps1,
+#      rendered with IDLE_MINUTES), converged by RENDERED-script hash like the toolchain —
+#      so both script edits and an IDLE_MINUTES change re-apply on the next run.
+os_install_idle_monitor() {
+  local host=$1 script="$SCRIPT_DIR/azure/idle-monitor.ps1"
+  [ -n "${IDLE_MINUTES:-}" ] || return 0
+  need az; need perl
+  [ -f "$script" ] || die "missing idle-monitor script: $script"
+
+  log "ensuring managed identity + deallocate-only role on $DROPLET_NAME"
+  az vm identity assign -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" >/dev/null \
+    || die "could not assign a system-assigned identity to $DROPLET_NAME"
+  local principal vmid
+  principal=$(az vm show -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" --query identity.principalId -o tsv)
+  vmid=$(az vm show -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" --query id -o tsv)
+  [ -n "$principal" ] && [ -n "$vmid" ] || die "could not read the VM's identity/id"
+  if [ -z "$(az role definition list --name devbox-self-deallocator --query '[0].roleName' -o tsv)" ]; then
+    az role definition create --role-definition "{
+      \"Name\": \"devbox-self-deallocator\",
+      \"Description\": \"May deallocate a VM. Nothing else. Used by devbox appliance self-shutdown.\",
+      \"Actions\": [\"Microsoft.Compute/virtualMachines/deallocate/action\"],
+      \"AssignableScopes\": [\"/subscriptions/$SUBSCRIPTION_ID\"]
+    }" >/dev/null || die "could not create the devbox-self-deallocator role definition"
+    log "created custom role devbox-self-deallocator (deallocate action only)"
+  fi
+  if [ -z "$(az role assignment list --assignee "$principal" --role devbox-self-deallocator --scope "$vmid" --query '[0].id' -o tsv 2>/dev/null)" ]; then
+    # A freshly minted principal can 404 in AAD for a minute — retry, don't fail the up.
+    local granted=0 i
+    for i in 1 2 3 4 5; do
+      if az role assignment create --assignee-object-id "$principal" --assignee-principal-type ServicePrincipal \
+           --role devbox-self-deallocator --scope "$vmid" >/dev/null 2>&1; then granted=1; break; fi
+      log "role assignment not accepted yet (AAD propagation) -- retry $i/5 in 15s"
+      sleep 15
+    done
+    [ "$granted" = 1 ] || die "could not grant devbox-self-deallocator to the VM's identity"
+  fi
+
+  local rendered want have
+  rendered=$(mktemp)
+  perl -pe "s/__IDLE_MINUTES__/$IDLE_MINUTES/g" "$script" > "$rendered"
+  # Guard: a non-ASCII byte (e.g. an em-dash) is read on the box as Windows-1252, where 0x94
+  # becomes a smart-quote that closes a PowerShell string early and breaks the whole script.
+  perl -ne 'exit 1 if /[^\x00-\x7f]/' "$rendered" \
+    || { rm -f "$rendered"; die "idle-monitor.ps1 contains non-ASCII bytes (they corrupt over run-command) -- make it pure ASCII"; }
+  want=$(perl -MDigest::SHA=sha256_hex -0777 -ne 'print sha256_hex($_)' "$rendered")
+  have=$(ssh_box "$host" 'powershell -NoProfile -Command "if (Test-Path C:\devbox-idlemon-rev) { Get-Content C:\devbox-idlemon-rev }"' 2>/dev/null | tr -d '[:space:]') || have=""
+  if [ -n "$have" ] && [ "$have" = "$want" ]; then
+    log "idle-monitor already at rev ${want:0:12} on $host -- skipping"
+    rm -f "$rendered"
+    return 0
+  fi
+  log "installing idle-monitor on $host (deallocates after $IDLE_MINUTES idle minutes; checks every 5)"
+  az vm run-command invoke -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
+    --command-id RunPowerShellScript --scripts "@$rendered" --query "value[].message" -o tsv \
+    || { rm -f "$rendered"; die "idle-monitor install (run-command) failed -- see C:\\devbox-idle-monitor-install.log on the box"; }
+  rm -f "$rendered"
+  # run-command reports success even when the script itself errors, so confirm the ready
+  # marker the installer clears up front and rewrites only on success.
+  ssh_box "$host" 'powershell -NoProfile -Command "if (Test-Path C:\devbox-idlemon-ready) { exit 0 } else { exit 1 }"' \
+    || die "idle-monitor did not complete (no C:\\devbox-idlemon-ready) -- check C:\\devbox-idle-monitor-install.log via '$(basename "$0") -p $DEVBOX_PROFILE ssh'"
+  ssh_box "$host" "powershell -NoProfile -Command \"Set-Content -Path C:\devbox-idlemon-rev -Value '$want' -Encoding ascii\"" \
+    || die "could not record idle-monitor rev on $host"
+}
+
 # ---- vault data path (PowerShell-native; called via OS branch from common.sh) ---------------
 # bao.exe (installed by vault-service.ps1) + Invoke-RestMethod to the localhost API; no jq/curl.
 # Each box-side script wraps its result in __VAULTJSON__...__ENDVAULTJSON__ so we parse it clean
