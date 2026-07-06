@@ -190,6 +190,39 @@ cmd_doctor() {
   [ "$bad" -eq 0 ] && echo "doctor: all checks passed" || { echo "doctor: $bad check(s) failed"; exit 1; }
 }
 
+# For APPLIANCE profiles (CI_DIR set — e.g. win-test), write the runner contract: box
+# identity + tunables the on-box runner (claude-config/scripts/win-test.sh) reads from
+# ~/.config/devbox/<profile>/runner.env. Written on the machine that ran `up` — the
+# appliance's operator (for win-test, the Linux devbox), which is exactly where the
+# runner executes. Overwritten every `up` so a re-created appliance's fresh IP lands
+# here. No-op for non-appliance profiles. Not a secret file, but DEVBOX_HOME is 0700
+# state — keep the file 0600 like its siblings.
+emit_runner_env() {
+  local ip=$1
+  [ -n "${CI_DIR:-}" ] || return 0
+  # Appliance profiles are Azure (spec P1: Windows -> Azure): the runner starts the VM
+  # via `az vm start -g RESOURCE_GROUP -n VM_NAME`, so both must be present.
+  [ -n "${RESOURCE_GROUP:-}" ] || die "CI_DIR is set but RESOURCE_GROUP is empty — appliance profiles need the Azure resource group"
+  umask 077; mkdir -p "$DEVBOX_HOME"
+  cat > "$DEVBOX_HOME/runner.env" <<EOF
+# Written by 'devbox -p $DEVBOX_PROFILE up' — box identity + tunables for the win-test
+# runner (~/.claude/scripts/win-test.sh). Regenerated on every 'up'; edit the profile
+# conf, not this file.
+RESOURCE_GROUP=$RESOURCE_GROUP
+VM_NAME=$DROPLET_NAME
+SSH_HOST=$ip
+SSH_PORT=$SSH_PORT
+SSH_USER=$DEVBOX_USER
+SUBSCRIPTION_ID=${SUBSCRIPTION_ID:-}
+CI_DIR=$CI_DIR
+CI_RETAIN_DAYS=${CI_RETAIN_DAYS:-14}
+CI_MIN_FREE_GB=${CI_MIN_FREE_GB:-20}
+IDLE_MINUTES=${IDLE_MINUTES:-20}
+EOF
+  chmod 600 "$DEVBOX_HOME/runner.env"
+  log "wrote appliance runner config -> $DEVBOX_HOME/runner.env (read by /win-test)"
+}
+
 # One command, end to end: provision (if absent) -> configure -> vault ready -> load all
 # ~/devbox-secrets/<proj>.env. Idempotent: re-running an existing box re-converges.
 cmd_up() {
@@ -206,6 +239,7 @@ cmd_up() {
     ip="$PROVISIONED_IP"
   fi
   cmd_configure --host "$ip"
+  emit_runner_env "$ip"       # appliance profiles: write runner.env for /win-test (no-op otherwise)
   VAULT_HOST="$ip"            # reuse this IP for the vault steps (no extra lookups)
   vault_bringup              # start OpenBao + init/unseal as needed
   vault_load_all             # push every ~/devbox-secrets/<proj>.env

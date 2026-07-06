@@ -284,12 +284,41 @@ chmod 600 "$key"; chmod 644 "$key.pub"   # assert perms even if the files pre-ex
 EOF
 }
 
-# os_configure HOST — ensure the machine identity, clone/pull the repo over the forwarded
-# agent, install the config, and verify the toolchain + guard. The host-key pin happens
-# in common before this call.
+# ---- operator tools (the box operates OTHER deployments) ---------------------
+# The Linux box is the operator for the win-test appliance: both the /win-test runner
+# (`az vm start` per run) and `devbox -p win-test up` run ON the box and need the Azure
+# CLI. Ensure it's installed — Microsoft's apt repo, keyring fetched over TLS (same
+# pattern as the gh install in cloud-init). Lives in configure, like the machine
+# identity, so one implementation converges fresh AND already-deployed boxes; fast no-op
+# once az is on PATH. `az login` stays manual/interactive (spec E6 spirit) — az's token
+# cache appears only after the operator logs in, and is revocable in Azure AD.
+ensure_operator_tools() {
+  local host=$1
+  ssh_box "$host" 'bash -s' <<'EOF'
+set -eu
+command -v az >/dev/null 2>&1 && { echo "operator-tools: azure-cli already installed -- nothing to do"; exit 0; }
+echo "operator-tools: installing azure-cli (Microsoft apt repo)"
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /etc/apt/keyrings/microsoft.gpg >/dev/null
+sudo chmod go+r /etc/apt/keyrings/microsoft.gpg
+codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ $codename main" \
+  | sudo tee /etc/apt/sources.list.d/azure-cli.list >/dev/null
+sudo apt-get update -qq
+sudo apt-get install -y -qq azure-cli
+command -v az >/dev/null 2>&1 || { echo "operator-tools: azure-cli install FAILED (az not on PATH)" >&2; exit 1; }
+echo "operator-tools: installed $(az version --output tsv --query '"azure-cli"' 2>/dev/null || echo azure-cli)"
+EOF
+}
+
+# os_configure HOST — ensure the machine identity + operator tools, clone/pull the repo
+# over the forwarded agent, install the config, and verify the toolchain + guard. The
+# host-key pin happens in common before this call.
 os_configure() {
   local host=$1
   ensure_machine_identity "$host"
+  log "ensuring operator tools on $host (azure-cli)"
+  ensure_operator_tools "$host"
   ssh -A -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
       "$DEVBOX_USER@$host" "bash -s" <<EOF
 set -euo pipefail
@@ -312,6 +341,7 @@ check "git"     "git --version"
 check "gh"      "gh --version"
 check "node"    "node --version"
 check "claude"  "claude --version"
+check "az"      "command -v az"
 guard=$(printf '{"tool_input":{"command":"git push"}}' | node "$HOME/.claude/hooks/git-write-guard.js")
 case "$guard" in *'"permissionDecision":"ask"'*) echo "  ok    git-write-guard fires" ;; *) echo "  FAIL  git-write-guard"; bad=$((bad+1)) ;; esac
 [ "$bad" -eq 0 ] && echo "verify: all checks passed" || { echo "verify: $bad check(s) failed"; exit 1; }

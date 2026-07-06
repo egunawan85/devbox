@@ -132,6 +132,12 @@ re-derived from the private half). Spec: `docs/devbox.spec.md` A6.
   running `devbox -p win-test up`** — the Linux devbox. Because the machine identity is
   auto-provisioned there, that default now works out of the box: the appliance
   authorizes the Linux box's machine key, and unattended `/win-test` runs log in with it.
+- **Operator tools come with it:** `configure` also installs the **Azure CLI** on each
+  Linux box (Microsoft apt repo, idempotent) — the box needs `az` both to stand up the
+  appliance and per run (`az vm start`). And for appliance profiles (those with `CI_DIR`
+  set), `up` writes **`~/.config/devbox/<profile>/runner.env`** — the box identity +
+  tunables the `/win-test` runner reads; it's regenerated on every `up`, so a re-created
+  appliance's fresh IP lands there automatically.
 - **Revoke:** remove the pubkey from the target box's `authorized_keys` (or re-provision
   the target after dropping it from `SSH_PUBKEY_FILES`). **Rotate:** delete
   `~/.ssh/id_ed25519{,.pub}` on the box, re-run `devbox configure` (generates a fresh
@@ -144,8 +150,9 @@ re-derived from the private half). Spec: `docs/devbox.spec.md` A6.
   provider, so a missing identity fails loudly up front instead of deep in a render.
 
 **Still manual, by design** (interactive/one-time operator steps — `doctor` verifies
-them, nothing automates them): `az login` (or `doctl auth init`), setting
-`SUBSCRIPTION_ID`, and editing `targets/<profile>.conf`.
+them, nothing automates them): `az login` (or `doctl auth init`; the `az` *binary* is
+auto-installed on Linux boxes, the *login* is yours), setting `SUBSCRIPTION_ID`, and
+editing `targets/<profile>.conf`.
 
 ## Secrets — the on-box vault
 
@@ -279,7 +286,8 @@ exposure of Case-2 file materialization.
 - Droplet `devbox` (Ubuntu 24.04, `sgp1`, `s-2vcpu-4gb`), user `eddyg` (passwordless sudo).
 - SSH on **port 2222**, key-only, no root login, agent forwarding allowed.
 - Firewall: **inbound tcp/2222 only**, outbound open.
-- Toolchain: `git`, `gh`, Node LTS, Claude Code CLI.
+- Toolchain: `git`, `gh`, Node LTS, Claude Code CLI, Azure CLI (installed by `configure` —
+  the box operates Azure-hosted peer deployments like win-test; `az login` is yours).
 - `claude-config/` installed into `~/.claude` via `install.sh`.
 
 ## First-session auth (interactive, no secrets at rest)
