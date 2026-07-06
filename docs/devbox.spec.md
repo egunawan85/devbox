@@ -49,23 +49,41 @@ Each requirement is observable — you can check whether a given box satisfies i
 - **A2** Direct root/Administrator SSH login is disabled; access is via `eddyg`
   (sudo / admin as appropriate).
 - **A3** **Up to two device public keys** (laptop + desktop) are authorized for
-  `eddyg`. These are my existing keys — the same ones I use for repos.
-- **A4** **No private key is ever stored on the box.** The box performs outbound
-  authenticated work (git, other devboxes) without a key at rest. _Linux:_ via **SSH
-  agent forwarding** of my device's agent. _Windows:_ the OpenSSH **server** on Windows
-  does not implement agent forwarding (confirmed even on the latest OpenSSH v10), so the
-  forwarded-agent mechanism is unavailable and is replaced by two paths: (a) the **devbox
-  config** is **pushed from the operator's machine** over the authenticated SSH session
-  during `configure` (the box never authenticates to GitHub for it); (b) **project repos**
-  (the box's actual work) are reached by **interactive `gh auth login` + HTTPS git** in a
-  dev session — a revocable, scoped OAuth token in `gh`'s config, consistent with the
-  interactive box-auth already blessed by [E6]/[T4]. No SSH private key is ever stored on
-  either OS.
+  `eddyg`. These are my existing keys — the same ones I use for repos. (A box may
+  additionally authorize **peer boxes' machine identities** — see A6; the two-key bound
+  is about *device* keys.)
+- **A4** **No device private key is ever stored on the box.** The box performs outbound
+  authenticated work (git, other devboxes) without a *device* key at rest. _Linux:_ via
+  **SSH agent forwarding** of my device's agent. _Windows:_ the OpenSSH **server** on
+  Windows does not implement agent forwarding (confirmed even on the latest OpenSSH v10),
+  so the forwarded-agent mechanism is unavailable and is replaced by two paths: (a) the
+  **devbox config** is **pushed from the operator's machine** over the authenticated SSH
+  session during `configure` (the box never authenticates to GitHub for it); (b)
+  **project repos** (the box's actual work) are reached by **interactive `gh auth login`
+  + HTTPS git** in a dev session — a revocable, scoped OAuth token in `gh`'s config,
+  consistent with the interactive box-auth already blessed by [E6]/[T4]. No *device* SSH
+  private key is ever stored on either OS; the box's **own** machine identity (A6) is the
+  deliberate exception — a key that is *born on the box*, never a copy of a device key.
 - **A5** After deploy, I can reach the box from **either device with no password
   prompt**. _Linux:_ agent forwarding works (`ssh-add -l` over the connection shows my
   keys; `git ls-remote` to a private repo succeeds from the box). _Windows:_ `configure`
   delivers the config repo via push-from-laptop, and a `gh auth login` session can clone
   the project repos over HTTPS (see A4).
+- **A6** **Machine identity (box-to-box SSH).** Each **Linux** box has its own resident
+  **ed25519** keypair at `~/.ssh/id_ed25519` (`0600`, **no passphrase**), **generated on
+  the box** by `configure` — created only if absent, an existing key is never
+  overwritten — so a fresh box (first `up`) and an already-deployed box (its next
+  `configure`/`up`) both converge on it (D3). It exists so the box can authenticate to
+  **other devbox deployments** it's been granted (e.g. the win-test appliance)
+  **unattended** — a scheduled run has no forwarded agent. *No passphrase* is required
+  for that role (an unattended client has no keychain/human to unlock one); the
+  compensating controls are **scope and revocability**: the key is never a copy of a
+  device key, it grants access only where its pubkey is explicitly authorized, and it is
+  revoked by removing that pubkey from the target's `authorized_keys` (or re-provisioning
+  the target) — rotate by deleting the pair on the box, re-running `configure`, and
+  re-authorizing targets. **Windows boxes have none** (they are SSH *targets*, not
+  clients; the win-test appliance is credential-free by design) — extend an OS module's
+  `configure` if that OS ever becomes an SSH client.
 
 ## C — Claude configuration
 

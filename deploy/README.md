@@ -49,6 +49,7 @@ devbox ssh        # connect (agent-forwarded)
 devbox status     # show the droplet
 devbox configure  # re-install config only (existing box)
 devbox render     # print the rendered cloud-init — no API calls (safe to inspect)
+devbox doctor     # check operator prereqs (machine identity, provider CLI/auth) — read-only
 devbox vault up        # bring the vault to ready (start + init/unseal as needed)
 devbox vault load myapp # (re)push one project's ~/.config/devbox/<profile>/secrets/myapp.env
 devbox vault refresh myapp # load + re-materialize into a live session (no re-login)
@@ -105,6 +106,46 @@ logon/logoff events) materializes them to the **encrypted OS disk** while you ha
 session and the vault is unsealed, and **wipes them at the last logout** (tracked manifest;
 a pre-existing real file is never touched). There is a ≤60s window after the last logout
 before the wipe fires. See `docs/devbox.spec.md` §E8.
+
+## Machine identity — box-to-box SSH (unattended runs)
+
+A deployed devbox is sometimes the **operator** for *another* deployment: the Linux
+devbox stands up and drives the `win-test` Windows appliance (`devbox -p win-test up`,
+then `/win-test` per run). For a scheduled/unattended run there is **no forwarded Mac
+agent** on the box, so the box needs its **own resident SSH key** — and copying your
+personal key onto a cloud box is exactly what the spec forbids.
+
+So `configure` (and therefore every `up`) **auto-provisions a machine identity on each
+Linux box**: an ed25519 keypair at `~/.ssh/id_ed25519` (`0600`), **generated on the box**,
+created only if absent — an existing key is never overwritten (a missing `.pub` is
+re-derived from the private half). Spec: `docs/devbox.spec.md` A6.
+
+- **Why no passphrase:** the key exists *for* unattended use — there is no human or
+  keychain in a scheduled run to unlock it. The compensating controls are scope and
+  revocability, not a passphrase.
+- **Scope:** the key grants access **only where its pubkey is explicitly authorized**
+  (e.g. baked into the win-test appliance's `authorized_keys` at provision time). It is
+  never a copy of a device key, so your personal key's blast radius is untouched.
+  Linux boxes only — Windows boxes are SSH *targets*, not clients, and get none.
+- **How it wires up win-test:** `targets/win-test.conf` keeps the default
+  `SSH_PUBKEY_FILES="$HOME/.ssh/id_ed25519.pub"`, which is evaluated **on the machine
+  running `devbox -p win-test up`** — the Linux devbox. Because the machine identity is
+  auto-provisioned there, that default now works out of the box: the appliance
+  authorizes the Linux box's machine key, and unattended `/win-test` runs log in with it.
+- **Revoke:** remove the pubkey from the target box's `authorized_keys` (or re-provision
+  the target after dropping it from `SSH_PUBKEY_FILES`). **Rotate:** delete
+  `~/.ssh/id_ed25519{,.pub}` on the box, re-run `devbox configure` (generates a fresh
+  pair), and re-authorize targets.
+- **Check before you rely on it:** `devbox -p <profile> doctor` verifies the operator
+  prereqs with actionable failures — the pubkeys in `SSH_PUBKEY_FILES` exist, a
+  **resident** private key is present (an ssh-agent alone only covers interactive use),
+  and the profile's provider CLI is installed + logged in (`az` for Azure profiles,
+  `doctl` for DigitalOcean). `up` runs the key checks itself before touching the
+  provider, so a missing identity fails loudly up front instead of deep in a render.
+
+**Still manual, by design** (interactive/one-time operator steps — `doctor` verifies
+them, nothing automates them): `az login` (or `doctl auth init`), setting
+`SUBSCRIPTION_ID`, and editing `targets/<profile>.conf`.
 
 ## Secrets — the on-box vault
 

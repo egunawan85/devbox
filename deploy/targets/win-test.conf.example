@@ -42,6 +42,12 @@ TAG=win-test
 # --- Access (key-only SSH on a non-default port; no RDP) ---
 DEVBOX_USER=eddyg
 SSH_PORT=2222
+# Evaluated on the machine that runs `devbox -p win-test up` — normally the LINUX DEVBOX,
+# which drives this appliance. The default below works out of the box there: `configure`
+# auto-provisions the box's MACHINE IDENTITY at ~/.ssh/id_ed25519 (spec A6, no
+# passphrase), so the appliance authorizes that key and unattended /win-test runs (no
+# forwarded agent) can log in. Verify prereqs with: devbox -p win-test doctor
+# Revoke by removing the pubkey from the appliance's authorized_keys / re-provisioning.
 SSH_PUBKEY_FILES="$HOME/.ssh/id_ed25519.pub"
 
 # --- Config source (cloned on the box during `configure`) ---
