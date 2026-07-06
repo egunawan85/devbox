@@ -33,9 +33,12 @@ try {
   & $choco install -y --no-progress powershell-core azure-cli sqlcmd nuget.commandline vcredist140 rsync
   if ($LASTEXITCODE -ne 0) { throw "choco toolchain install failed: exit $LASTEXITCODE" }
   # Fail loud NOW (not at the first /win-test sync) if the rsync shim didn't land or can't run.
+  # Capture output in full, THEN truncate: piping a native command into Select-Object -First
+  # kills its pipe mid-write, which fails rsync (exit -1) even when it works.
   $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
-  & rsync --version 2>&1 | Select-Object -First 1 | Write-Output
+  $rsyncVer = & rsync --version 2>&1
   if ($LASTEXITCODE -ne 0) { throw "rsync installed but does not run: exit $LASTEXITCODE" }
+  Write-Output ($rsyncVer | Select-Object -First 1)
 
   # --- VS 2022 Build Tools: Web workload + .NET FW targeting packs (verified recipe) ---
   $bt = Join-Path $env:TEMP 'vs_buildtools.exe'
