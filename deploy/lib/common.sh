@@ -448,7 +448,9 @@ vault_load_all() {
   local any=0 f
   while IFS= read -r f; do
     any=1
-    vault_load "$(proj_for_file "$f")"
+    # </dev/null: vault_load runs ssh, which would otherwise drain the file list
+    # from the loop's stdin and end the loop after one project.
+    vault_load "$(proj_for_file "$f")" </dev/null
   done < <(find "$SECRETS_DIR" -type f -name '*.env' 2>/dev/null | sort)
   [ "$any" = 1 ] || log "no <project>.env files under $SECRETS_DIR — skipping secret load"
 }
