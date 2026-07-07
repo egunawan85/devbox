@@ -112,10 +112,12 @@ try {
 
   # Select test projects by naming convention (*.Tests.<Suite>.csproj); 'all' runs every
   # *.Tests.*.csproj EXCEPT E2E (live staging + real secrets — the scheduled GH Action's
-  # job, not this appliance's — spec §X2).
+  # job, not this appliance's — spec §X2) and Fixtures (the shared test-data/helpers
+  # library the suites borrow from — not a runnable suite: it carries no test adapter,
+  # so it executes zero tests and would trip the §X5 zero-tests-fails-loud rule).
   $pattern = if ($Suite -eq 'all') { '*.Tests.*.csproj' } else { "*.Tests.$Suite.csproj" }
   $projects = Get-ChildItem -Path $RepoDir -Recurse -Filter $pattern -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' -and $_.Name -notmatch '\.Tests\.E2E\.' }
+              Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' -and $_.Name -notmatch '\.Tests\.(E2E|Fixtures)\.' }
   if (-not $projects) { throw "win-test-run: no test projects matched '$pattern' under $RepoDir" }
 
   # Classic packages.config projects keep their VSTest adapter (e.g. xunit.runner.visualstudio)
