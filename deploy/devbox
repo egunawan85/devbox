@@ -15,7 +15,7 @@
 #   devbox [-p PROFILE] vault up          bring the vault to ready (start + init/unseal)
 #   devbox [-p PROFILE] vault init        init + unseal a fresh box (saves keys to laptop)
 #   devbox [-p PROFILE] vault unseal      re-unseal an existing box from your saved key
-#   devbox [-p PROFILE] vault load <proj> push ~/devbox-secrets/<proj>.env into the vault
+#   devbox [-p PROFILE] vault load <proj> push the project's local .env (under ~/.config/devbox/<profile>/secrets/) into the vault
 #   devbox [-p PROFILE] vault refresh [proj]  load <proj> (or all) + re-materialize live
 #   devbox [-p PROFILE] vault status      initialized / sealed?
 #   devbox [-p PROFILE] down [--yes]      destroy the box + firewall

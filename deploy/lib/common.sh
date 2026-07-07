@@ -180,6 +180,23 @@ cmd_doctor() {
     echo "  FAIL  no resident private key and no agent identities — this machine can't SSH anywhere; create one: ssh-keygen -t ed25519 -N '' -f \$HOME/.ssh/id_ed25519"
     bad=$((bad+1))
   fi
+  # secrets.map (when present): every mapped project must resolve to exactly one local
+  # .env under SECRETS_DIR — catches a rename/reorg that leaves the box mapping a
+  # project nothing loads anymore. (An ambiguous name die()s inside the subshell; its
+  # message lands on stderr above the FAIL line.)
+  if [ -f "$SECRETS_MAP" ]; then
+    local proj dest rest sf
+    while read -r proj dest rest || [ -n "$proj" ]; do
+      case "$proj" in ''|\#*) continue ;; esac
+      [ -n "${dest:-}" ] || continue
+      if sf=$(secrets_file_for "$proj"); then
+        echo "  ok    secrets.map '$proj' -> secrets/${sf#"$SECRETS_DIR/"}"
+      else
+        echo "  FAIL  secrets.map '$proj' has no .env under $SECRETS_DIR (flat '$proj.env' or foldered; folders join with dots)"
+        bad=$((bad+1))
+      fi
+    done < "$SECRETS_MAP"
+  fi
   # Subshell: prov_ready die()s on failure (its message lands on stderr above our verdict).
   if (prov_ready); then
     echo "  ok    provider CLI + auth ($PROVIDER)"
@@ -223,8 +240,8 @@ EOF
   log "wrote appliance runner config -> $DEVBOX_HOME/runner.env (read by /win-test)"
 }
 
-# One command, end to end: provision (if absent) -> configure -> vault ready -> load all
-# ~/devbox-secrets/<proj>.env. Idempotent: re-running an existing box re-converges.
+# One command, end to end: provision (if absent) -> configure -> vault ready -> load
+# every .env under $SECRETS_DIR. Idempotent: re-running an existing box re-converges.
 cmd_up() {
   load_conf
   preflight_identity   # fail loud + early on missing key material, before any provider call
@@ -242,7 +259,7 @@ cmd_up() {
   emit_runner_env "$ip"       # appliance profiles: write runner.env for /win-test (no-op otherwise)
   VAULT_HOST="$ip"            # reuse this IP for the vault steps (no extra lookups)
   vault_bringup              # start OpenBao + init/unseal as needed
-  vault_load_all             # push every ~/devbox-secrets/<proj>.env
+  vault_load_all             # push every $SECRETS_DIR .env
   os_install_toolchain "$ip" # Layer B: project build stack (no-op on linux; windows: ~20-30 min
                              # on a fresh box, skipped while the box's recorded toolchain.ps1
                              # hash matches, re-applied automatically when the script changes)
@@ -399,16 +416,41 @@ vault_bringup() {
 # `devbox vault up` — same readiness as part of `devbox up`.
 vault_up() { vault_bringup; }
 
-# Push every ~/devbox-secrets/<project>.env into the vault (used by `up`).
+# Map a local .env under $SECRETS_DIR to its vault project name: the relative path,
+# '.env' stripped, path separators joined with dots. Folders are LAPTOP-SIDE
+# organization only — secrets/kash-cards/deploy.prd.env and the flat
+# secrets/kash-cards.deploy.prd.env are the same project (kash-cards.deploy.prd) — so
+# a reorg never touches the vault path, secrets.map, or the on-box materializers.
+proj_for_file() {
+  local rel=${1#"$SECRETS_DIR/"}
+  printf '%s' "${rel%.env}" | tr / .
+}
+
+# Resolve a project name back to its local .env: the tree entry whose dot-joined
+# relative path matches (the flat <proj>.env is itself such an entry). Two matches —
+# flat vs foldered, or two folderings — would silently shadow each other in the
+# vault, so that dies instead. Prints the path; returns non-zero (printing nothing)
+# when no file matches.
+secrets_file_for() {
+  local proj=$1 f found=""
+  while IFS= read -r f; do
+    [ "$(proj_for_file "$f")" = "$proj" ] || continue
+    [ -z "$found" ] || die "project '$proj' is ambiguous: $found and $f both resolve to it — rename or move one"
+    found=$f
+  done < <(find "$SECRETS_DIR" -type f -name '*.env' 2>/dev/null)
+  [ -n "$found" ] && printf '%s' "$found"
+}
+
+# Push every .env under $SECRETS_DIR (flat or foldered, see proj_for_file) into the
+# vault (used by `up`).
 vault_load_all() {
   [ -d "$SECRETS_DIR" ] || { log "no secrets dir ($SECRETS_DIR) — skipping secret load"; return 0; }
   local any=0 f
-  for f in "$SECRETS_DIR"/*.env; do
-    [ -e "$f" ] || continue
+  while IFS= read -r f; do
     any=1
-    vault_load "$(basename "$f" .env)"
-  done
-  [ "$any" = 1 ] || log "no <project>.env files in $SECRETS_DIR — skipping secret load"
+    vault_load "$(proj_for_file "$f")"
+  done < <(find "$SECRETS_DIR" -type f -name '*.env' 2>/dev/null | sort)
+  [ "$any" = 1 ] || log "no <project>.env files under $SECRETS_DIR — skipping secret load"
 }
 
 # First time on a box: initialize (single unseal key), unseal, enable the kv mount,
@@ -495,8 +537,9 @@ vault_load() {
   local proj=${1:-}; [ -n "$proj" ] || die "usage: $(basename "$0") vault load <project>"
   case "$proj"        in ''|-*|*[!a-zA-Z0-9._-]*) die "invalid project name: '$proj'";; esac
   case "$VAULT_MOUNT" in ''|-*|*[!a-zA-Z0-9._-]*) die "invalid VAULT_MOUNT: '$VAULT_MOUNT'";; esac
-  local f="$SECRETS_DIR/$proj.env"
-  [ -f "$f" ] || die "no secrets file at $f"
+  local f
+  f=$(secrets_file_for "$proj") \
+    || die "no secrets file for '$proj' under $SECRETS_DIR — expected $proj.env, flat or in folders (folders join with dots: kash-cards/deploy.prd.env == kash-cards.deploy.prd)"
   local host json; host=$(vault_host)
   json=$(env_to_json "$f") || die "failed to parse $f"
   [ "$OS" = windows ] && { printf '%s' "$json" | win_vault_load "$proj" "$VAULT_MOUNT" "$host"; return; }   # PowerShell-native (os/windows.sh)
@@ -518,7 +561,7 @@ vault_load() {
 
 # Push local .env(s) into the vault, then re-materialize them on the box for any
 # active login session by restarting the session-secrets user service. With no
-# project, refreshes every ~/devbox-secrets/*.env. The on-box restart is best
+# project, refreshes every .env under $SECRETS_DIR. The on-box restart is best
 # effort: with no active session there is nothing to re-materialize — secrets
 # land on the next login anyway. This saves a logout/login round-trip when you've
 # edited a .env and want a live session to see the new values.

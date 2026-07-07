@@ -168,6 +168,21 @@ project under `~/.config/devbox/<profile>/secrets/` (the `SECRETS_DIR` in your c
 ~/.config/devbox/<profile>/secrets/myapp.env     # KEY=value lines, edited in your editor
 ```
 
+With many projects the flat pool gets cluttered — you can organize `secrets/` into
+folders. Path separators join with dots to form the project name, so these are the
+**same project** (`kash-cards.deploy.prd`, the name used with `vault load`, in
+`secrets.map`, and as the vault path):
+
+```
+~/.config/devbox/<profile>/secrets/kash-cards.deploy.prd.env    # flat
+~/.config/devbox/<profile>/secrets/kash-cards/deploy.prd.env    # foldered
+```
+
+Folders are laptop-side organization only — nothing on any box changes when you
+reorganize. Two files that resolve to the same project name are an error (`vault load`
+dies rather than letting one shadow the other), and `devbox doctor` verifies every
+`secrets.map` project still resolves to exactly one local file.
+
 Values are taken **literally** — `KEY=value` stores `value`; `KEY="value"` stores the
 quotes too. `export KEY=value` is fine; comments/blanks/junk are ignored; CRLF is
 tolerated.
