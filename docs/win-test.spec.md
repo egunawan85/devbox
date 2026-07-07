@@ -61,7 +61,10 @@ Each requirement is observable — you can check whether a given setup satisfies
 ## X — Execution & results
 
 - **X1** Suites are selected by naming convention: `*.Tests.<suite>.csproj` for
-  `unit|integration|smoke`; **`all`** runs every `*.Tests.*.csproj` **except E2E**.
+  `unit|integration|smoke`; **`all`** runs every `*.Tests.*.csproj` **except E2E**
+  (§X2) **and Fixtures** — `*.Tests.Fixtures` is the shared test-data/helpers library
+  the suites borrow from, not a runnable suite; it executes zero tests and would
+  otherwise trip §X5's fail-loud rule.
 - **X2** The **E2E/Playwright staging suite is out of scope** here — it needs a live
   staging env and real secrets, and runs as a scheduled GitHub Action.
 - **X3** Runs are **credential-free**: no vault materialization in the hot path (the
