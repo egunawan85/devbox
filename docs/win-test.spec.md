@@ -72,6 +72,22 @@ Each requirement is observable — you can check whether a given setup satisfies
 - **X5** The runner's **exit code mirrors the suite** (0 iff every project passed). A run
   that could not execute (box unreachable, no config, no matching projects) is a **loud
   failure**, never a silent pass.
+- **X6** Completion is signalled by an **artifact, not the SSH channel**: the box-side
+  runner's final act — on pass, fail, or throw — is writing `tmp/win-test/done.json`
+  (run id + real exit code). The orchestrator treats that sentinel as the source of truth
+  for "finished"; the SSH session exiting is merely the common case. To keep that common
+  case working, the runner **tears down LocalDB** (stop, never delete — §L5 keeps the
+  catalog) before exiting, so no child process outlives the run holding the session's
+  stdio open.
+- **X7** The orchestrator **never blocks indefinitely**: while the suite runs it emits a
+  periodic heartbeat (elapsed, remote log progress, TRX presence); it short-circuits as
+  soon as the sentinel appears (killing a lingering SSH channel); and past
+  `WIN_TEST_TIMEOUT` (default 60 min) it aborts — capturing diagnostics (box power
+  state, remote process list, log tail), fetching partial results — and exits **124**
+  with an explicit "possible hang" message.
+- **X8** Result fetch is **loud**: a failed fetch is reported, and a run that claims pass
+  without a TRX from this run fetched locally is reported as a **failure** (green needs
+  evidence — X5).
 
 ## I — Invocation & wiring
 

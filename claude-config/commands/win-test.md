@@ -20,10 +20,13 @@ current git worktree; default suite is `integration`. The script:
 - wakes the `win-test` box (idempotent — no-op if already warm),
 - rsyncs this worktree to `C:\ci\<branch>` (kept per-branch for warm incremental builds),
 - runs the suite under a box-wide lock (concurrent sessions queue — they share one LocalDB),
+- prints a heartbeat while the suite runs and watchdogs the whole thing — past
+  `WIN_TEST_TIMEOUT` (default 60 min) it aborts with diagnostics instead of hanging,
 - fetches the TRX + console logs into `./tmp/win-test/`,
 - leaves the box running; it self-deallocates after it's been idle a while.
 
-The script's exit code mirrors the suite (0 = all passed).
+The script's exit code mirrors the suite (0 = all passed). Exit 124 means the run
+**timed out — possible hang**, not a suite verdict: report it as such.
 
 ## Step 2 — Report the real outcome
 
