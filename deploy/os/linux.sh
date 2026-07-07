@@ -44,10 +44,12 @@ os_box_ready() {
   ssh_box "$1" 'cloud-init status 2>/dev/null | grep -q "status: done" && test -f /var/lib/cloud/devbox-ready' 2>/dev/null
 }
 
-# ---- session secrets (login-time vault -> app .env on tmpfs) ----------------
+# ---- session secrets (login-time vault -> app .env / raw file on tmpfs) -----
 # Optional feature, opt-in by the presence of a local secrets.map. On SSH login it
-# materializes each mapped vault project into the app's .env path (a symlink into
-# /dev/shm tmpfs — RAM, never disk); on the LAST logout/disconnect it wipes them.
+# materializes each mapped vault project into its dest path — KEY=value lines for an
+# env project, verbatim bytes for a file-mode one (reserved __file__ key) — as a
+# symlink into /dev/shm tmpfs (RAM, never disk); on the LAST logout/disconnect it
+# wipes them.
 # Lifecycle is a systemd *user* service: logind keeps the user manager alive while any
 # session exists and stops it at the last one (incl. dropped connections), so cleanup is
 # reference-counted natively. The vault must be unsealed (from the laptop) first.
@@ -73,15 +75,16 @@ install_session_secrets() {
   local clean; clean=$(validate_secrets_map "$SECRETS_MAP") || die "invalid $SECRETS_MAP (see above)"
   [ -n "$clean" ] || { log "secrets.map has no mappings — skipping session-secrets setup"; return 0; }
   ssh_box "$host" 'true'
-  log "installing session-secrets (login-time vault -> .env materialization) on $host"
+  log "installing session-secrets (login-time vault -> .env/file materialization) on $host"
   # 1) static hook script + systemd user unit + enable (idempotent).
   ssh_box "$host" 'bash -s' <<'EOF'
 set -eu
 mkdir -p "$HOME/.config/devbox" "$HOME/.config/systemd/user/default.target.wants"
 cat > "$HOME/.config/devbox/session-secrets.sh" <<'HOOK'
 #!/usr/bin/env bash
-# devbox session-secrets: vault -> app .env on tmpfs (RAM) while logged in; wiped at last
-# logout. Driven by ~/.config/devbox/secrets.map. Managed by devbox-secrets.service.
+# devbox session-secrets: vault -> app .env / raw file on tmpfs (RAM) while logged in;
+# wiped at last logout. Driven by ~/.config/devbox/secrets.map. Managed by
+# devbox-secrets.service.
 set -uo pipefail
 RAM=/dev/shm/devbox-secrets
 MAP="$HOME/.config/devbox/secrets.map"
@@ -103,13 +106,30 @@ case "${1:-}" in
         echo "devbox-secrets: $dest exists and is not our symlink — skipping (move it aside to use the vault copy)" >&2
         continue
       fi
-      if ! ( umask 077; bao kv get -mount=secret -format=json "$proj" 2>/dev/null \
-               | jq -r '.data.data | to_entries[] | "\(.key)=\(.value)"' > "$RAM/$proj.env" ) || [ ! -s "$RAM/$proj.env" ]; then
+      # </dev/null: don't let bao drain the MAP lines from the loop's stdin.
+      json=$(bao kv get -mount=secret -format=json "$proj" 2>/dev/null </dev/null)
+      if [ -z "$json" ]; then
         echo "devbox-secrets: could not read secret/$proj — skipping (is it loaded?)" >&2
-        rm -f "$RAM/$proj.env"; continue
+        continue
+      fi
+      # File mode (reserved __file__ key, base64 raw bytes): decode verbatim; the
+      # project name already carries the real extension, so no .env suffix.
+      # Env mode: rebuild KEY=value lines, as always.
+      if printf '%s' "$json" | jq -e '.data.data | has("__file__")' >/dev/null 2>&1; then
+        out="$RAM/$proj"
+        if ! ( umask 077; printf '%s' "$json" | jq -r '.data.data.__file__' | base64 -d > "$out" ) || [ ! -s "$out" ]; then
+          echo "devbox-secrets: could not decode file-mode secret/$proj — skipping" >&2
+          rm -f "$out"; continue
+        fi
+      else
+        out="$RAM/$proj.env"
+        if ! ( umask 077; printf '%s' "$json" | jq -r '.data.data | to_entries[] | "\(.key)=\(.value)"' > "$out" ) || [ ! -s "$out" ]; then
+          echo "devbox-secrets: could not parse secret/$proj — skipping" >&2
+          rm -f "$out"; continue
+        fi
       fi
       mkdir -p "$(dirname "$dest")"
-      ln -sfn "$RAM/$proj.env" "$dest"
+      ln -sfn "$out" "$dest"
     done < "$MAP"
     ;;
   out)
@@ -117,7 +137,7 @@ case "${1:-}" in
       case "$proj" in ''|\#*) continue ;; esac
       [ -n "${dest:-}" ] || continue
       [ -L "$dest" ] && rm -f "$dest"          # only remove OUR symlink, never a real file
-      rm -f "$RAM/$proj.env"
+      rm -f "$RAM/$proj.env" "$RAM/$proj"      # env-mode and file-mode names; at most one exists
     done < "$MAP"
     rmdir "$RAM" 2>/dev/null || true
     ;;

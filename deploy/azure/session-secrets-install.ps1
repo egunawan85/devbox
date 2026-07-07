@@ -3,7 +3,8 @@
 #
 # The watchdog (written verbatim below to C:\ProgramData\devbox\session-secrets.ps1) is the
 # Windows analog of the Linux login-time materializer: while user 'eddyg' has >=1 live SSH
-# session it materializes each mapped vault project into its app .env; at the last logout it
+# session it materializes each mapped vault project into its app .env (or, for a file-mode
+# project carrying the reserved __file__ key, the verbatim bytes); at the last logout it
 # wipes them. Windows has no tmpfs, so the .env lands on the encrypted OS disk (spec E8 Windows
 # clause), created on first session and deleted on the last -- never persisted while logged out.
 #
@@ -77,14 +78,19 @@ foreach ($m in $maps) {
   try {
     $j = (& $bao kv get -mount=secret -format=json $m.proj 2>$null | Out-String | ConvertFrom-Json)
     if (-not $j.data.data) { Log ("skip " + $m.proj + ": empty/not loaded"); continue }
-    $kv = @($j.data.data.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" })
     $pdir = Split-Path $m.dest -Parent
     if ($pdir -and -not (Test-Path -LiteralPath $pdir)) { New-Item -ItemType Directory -Force -Path $pdir | Out-Null }
     # Write to a temp, lock it, then atomically rename into place: the app never sees a partial
     # file, and the secret never exists at $dest with a permissive (inherited) ACL. UTF-8 no-BOM
     # (not -Encoding ascii, which silently mangles any non-ASCII secret value to '?').
     $tmp = "$($m.dest).devboxtmp"
-    [IO.File]::WriteAllLines($tmp, $kv, (New-Object Text.UTF8Encoding $false))
+    if ($j.data.data.__file__) {
+      # file mode: the reserved __file__ key holds the base64 of the raw bytes -- decode verbatim
+      [IO.File]::WriteAllBytes($tmp, [Convert]::FromBase64String($j.data.data.__file__))
+    } else {
+      $kv = @($j.data.data.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" })
+      [IO.File]::WriteAllLines($tmp, $kv, (New-Object Text.UTF8Encoding $false))
+    }
     icacls $tmp /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" ("$user" + ":R") 2>&1 | Out-Null
     Move-Item -LiteralPath $tmp -Destination $m.dest -Force
     $written += [pscustomobject]@{ proj=$m.proj; dest=$m.dest }

@@ -162,7 +162,7 @@ os_install_session_secrets() {
   [ -f "$script" ] || die "missing session-secrets installer: $script"
   perl -ne 'exit 1 if /[^\x00-\x7f]/' "$script" || die "session-secrets-install.ps1 has non-ASCII bytes -- make it pure ASCII"
   ssh_box "$host" 'exit 0'
-  log "installing session-secrets watchdog (vault -> .env while logged in; wiped at last logout) on $host"
+  log "installing session-secrets watchdog (vault -> .env/file while logged in; wiped at last logout) on $host"
   # 1) push the validated manifest to the user profile (writable without admin); data on stdin.
   local pushscript res
   pushscript=$(cat <<'PS'

@@ -181,8 +181,8 @@ cmd_doctor() {
     bad=$((bad+1))
   fi
   # secrets.map (when present): every mapped project must resolve to exactly one local
-  # .env under SECRETS_DIR — catches a rename/reorg that leaves the box mapping a
-  # project nothing loads anymore. (An ambiguous name die()s inside the subshell; its
+  # secret file under SECRETS_DIR — catches a rename/reorg that leaves the box mapping
+  # a project nothing loads anymore. (An ambiguous name die()s inside the subshell; its
   # message lands on stderr above the FAIL line.)
   if [ -f "$SECRETS_MAP" ]; then
     local proj dest rest sf
@@ -192,7 +192,7 @@ cmd_doctor() {
       if sf=$(secrets_file_for "$proj"); then
         echo "  ok    secrets.map '$proj' -> secrets/${sf#"$SECRETS_DIR/"}"
       else
-        echo "  FAIL  secrets.map '$proj' has no .env under $SECRETS_DIR (flat '$proj.env' or foldered; folders join with dots)"
+        echo "  FAIL  secrets.map '$proj' has no file under $SECRETS_DIR (env mode: '$proj.env'; file mode: '$proj' itself — flat or foldered; folders join with dots)"
         bad=$((bad+1))
       fi
     done < "$SECRETS_MAP"
@@ -416,33 +416,52 @@ vault_bringup() {
 # `devbox vault up` — same readiness as part of `devbox up`.
 vault_up() { vault_bringup; }
 
-# Map a local .env under $SECRETS_DIR to its vault project name: the relative path,
-# '.env' stripped, path separators joined with dots. Folders are LAPTOP-SIDE
-# organization only — secrets/kash-cards/deploy.prd.env and the flat
-# secrets/kash-cards.deploy.prd.env are the same project (kash-cards.deploy.prd) — so
-# a reorg never touches the vault path, secrets.map, or the on-box materializers.
+# Map a local secret file under $SECRETS_DIR to its vault project name: the relative
+# path, '.env' stripped (other extensions KEPT — see file mode below), path separators
+# joined with dots. Folders are LAPTOP-SIDE organization only —
+# secrets/kash-cards/deploy.prd.env and the flat secrets/kash-cards.deploy.prd.env are
+# the same project (kash-cards.deploy.prd) — so a reorg never touches the vault path,
+# secrets.map, or the on-box materializers.
+#
+# Two modes, decided by extension:
+#   *.env           — parsed KEY=value (env_to_json) and stored as a kv map, as always.
+#   everything else — "file mode": the raw bytes travel base64-encoded under the
+#                     reserved kv key __file__, and the box materializes them verbatim.
+#                     The project name keeps the extension (ramp-enablement.sql,
+#                     runegate.server.pem), which is what distinguishes it from an env
+#                     project of the same stem.
 proj_for_file() {
   local rel=${1#"$SECRETS_DIR/"}
   printf '%s' "${rel%.env}" | tr / .
 }
 
-# Resolve a project name back to its local .env: the tree entry whose dot-joined
-# relative path matches (the flat <proj>.env is itself such an entry). Two matches —
-# flat vs foldered, or two folderings — would silently shadow each other in the
-# vault, so that dies instead. Prints the path; returns non-zero (printing nothing)
-# when no file matches.
+# All candidate secret files under $SECRETS_DIR: every regular file except hidden
+# ones and anything inside a hidden dir (keeps .DS_Store and editor droppings out
+# of the vault). The prune matches dot-entries BELOW the root only — SECRETS_DIR
+# itself lives under ~/.config, so a naive `-path '*/.*'` would exclude everything
+# (and the root itself may legitimately be a dot-dir). Shared by secrets_file_for /
+# vault_load_all so the two can never disagree on what exists.
+secrets_files() {
+  find "$SECRETS_DIR" \( -name '.*' -not -path "$SECRETS_DIR" \) -prune -o -type f -print 2>/dev/null
+}
+
+# Resolve a project name back to its local secret file: the tree entry whose
+# dot-joined relative path matches (the flat <proj>.env — or the file-mode <proj>
+# itself — is such an entry). Two matches — flat vs foldered, or two folderings —
+# would silently shadow each other in the vault, so that dies instead. Prints the
+# path; returns non-zero (printing nothing) when no file matches.
 secrets_file_for() {
   local proj=$1 f found=""
   while IFS= read -r f; do
     [ "$(proj_for_file "$f")" = "$proj" ] || continue
     [ -z "$found" ] || die "project '$proj' is ambiguous: $found and $f both resolve to it — rename or move one"
     found=$f
-  done < <(find "$SECRETS_DIR" -type f -name '*.env' 2>/dev/null)
+  done < <(secrets_files)
   [ -n "$found" ] && printf '%s' "$found"
 }
 
-# Push every .env under $SECRETS_DIR (flat or foldered, see proj_for_file) into the
-# vault (used by `up`).
+# Push every secret file under $SECRETS_DIR (flat or foldered, .env or file mode —
+# see proj_for_file) into the vault (used by `up`).
 vault_load_all() {
   [ -d "$SECRETS_DIR" ] || { log "no secrets dir ($SECRETS_DIR) — skipping secret load"; return 0; }
   local any=0 f
@@ -451,8 +470,8 @@ vault_load_all() {
     # </dev/null: vault_load runs ssh, which would otherwise drain the file list
     # from the loop's stdin and end the loop after one project.
     vault_load "$(proj_for_file "$f")" </dev/null
-  done < <(find "$SECRETS_DIR" -type f -name '*.env' 2>/dev/null | sort)
-  [ "$any" = 1 ] || log "no <project>.env files under $SECRETS_DIR — skipping secret load"
+  done < <(secrets_files | sort)
+  [ "$any" = 1 ] || log "no secret files under $SECRETS_DIR — skipping secret load"
 }
 
 # First time on a box: initialize (single unseal key), unseal, enable the kv mount,
@@ -534,16 +553,35 @@ vault_unseal() {
   os_autoseal_arm "$host"   # (re)arm the auto-seal timer if AUTOSEAL_TTL is set
 }
 
-# Push a project's local .env into the box's vault at <mount>/<project>.
+# Push a project's local secret file into the box's vault at <mount>/<project>.
+# *.env is parsed to a kv map; any other file travels verbatim as base64 under the
+# reserved __file__ key (file mode) — the materializers branch on that key.
 vault_load() {
   local proj=${1:-}; [ -n "$proj" ] || die "usage: $(basename "$0") vault load <project>"
   case "$proj"        in ''|-*|*[!a-zA-Z0-9._-]*) die "invalid project name: '$proj'";; esac
   case "$VAULT_MOUNT" in ''|-*|*[!a-zA-Z0-9._-]*) die "invalid VAULT_MOUNT: '$VAULT_MOUNT'";; esac
   local f
   f=$(secrets_file_for "$proj") \
-    || die "no secrets file for '$proj' under $SECRETS_DIR — expected $proj.env, flat or in folders (folders join with dots: kash-cards/deploy.prd.env == kash-cards.deploy.prd)"
+    || die "no secrets file for '$proj' under $SECRETS_DIR — expected $proj.env (env mode) or $proj itself (file mode), flat or in folders (folders join with dots: kash-cards/deploy.prd.env == kash-cards.deploy.prd)"
   local host json; host=$(vault_host)
-  json=$(env_to_json "$f") || die "failed to parse $f"
+  case "$f" in
+    *.env)
+      json=$(env_to_json "$f") || die "failed to parse $f"
+      # __file__ is the file-mode marker the materializers key off — an env that
+      # defines it would masquerade as a file on the box. (if-form: under set -e a
+      # bare `jq && die` would abort the script whenever the key is absent.)
+      if printf '%s' "$json" | jq -e 'has("__file__")' >/dev/null; then
+        die "$f defines the reserved key __file__ — rename that variable"
+      fi
+      ;;
+    *)
+      [ -s "$f" ] || die "refusing to load empty file $f"
+      # base64: value must be a JSON string, and .pem/.p12/etc. may be binary.
+      # tr -d '\n' — GNU base64 wraps at 76 cols, BSD doesn't; normalize.
+      json=$(jq -n --arg c "$(base64 < "$f" | tr -d '\n')" '{__file__: $c}') \
+        || die "failed to encode $f"
+      ;;
+  esac
   [ "$OS" = windows ] && { printf '%s' "$json" | win_vault_load "$proj" "$VAULT_MOUNT" "$host"; return; }   # PowerShell-native (os/windows.sh)
   ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
   # Friendly pre-check: a sealed vault would otherwise give a raw 503 (L1).

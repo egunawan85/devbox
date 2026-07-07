@@ -146,7 +146,11 @@ the lifecycle wrappers (E7–E9) are OS-specific.
 - **E3** Secrets reach the box via **`devbox vault load [path]`**, which pushes the
   plaintext values from the operator's store into the box's OpenBao **over the
   authenticated SSH session**. The box never pulls secrets itself and keeps no durable
-  copy. Editing/organizing the store is done in the operator's editor.
+  copy. Editing/organizing the store is done in the operator's editor. Two payload
+  shapes ride the same pipeline: a **`*.env`** file is parsed to a key→value map, and
+  **any other file** in the store (a `.pem`, `.sql`, `.xml`, … — "file mode") travels
+  as its verbatim bytes (base64 under the reserved kv key `__file__`; the project name
+  keeps the extension) and materializes byte-for-byte (E8).
 - **E4** Secrets are **never** placed in cloud-init / user-data, shell rc files,
   committed files, or droplet metadata.
 - **E5** The vault uses a **single unseal key (1-of-1)**. The **unseal key + root token
@@ -174,9 +178,10 @@ the lifecycle wrappers (E7–E9) are OS-specific.
   concurrent sessions are safe and a lingering one (e.g. a VS Code server) keeps the
   files until it too ends. Requires the vault unsealed; cleanup never touches a real file
   the operator placed, the operator's store, or the vault. The substrate differs by OS:
-  - _Linux:_ secrets materialize to `.env` files **on tmpfs (RAM), never the box's
-    disk**; lifecycle is reference-counted natively by **logind** + a systemd user
-    service (materialize on first session, wipe on last).
+  - _Linux:_ secrets materialize to `.env` files (or, for file-mode projects, the
+    verbatim bytes) **on tmpfs (RAM), never the box's disk**; lifecycle is
+    reference-counted natively by **logind** + a systemd user service (materialize on
+    first session, wipe on last).
   - _Windows:_ no tmpfs and no logind, so secrets materialize to each cloned repo's
     gitignored **`.vault`/`.env`** files — the very files the app's own loader already
     consumes — on the box's **encrypted, ephemeral disk** (owner/SYSTEM-ACL'd), and the

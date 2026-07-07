@@ -168,6 +168,23 @@ project under `~/.config/devbox/<profile>/secrets/` (the `SECRETS_DIR` in your c
 ~/.config/devbox/<profile>/secrets/myapp.env     # KEY=value lines, edited in your editor
 ```
 
+**File mode.** Not every secret is an env: deployment config that can't live in the
+repo (a `.sql` enablement script, a `.pem` key, an `.xml` config) goes in the same
+tree and rides the same pipeline. Anything that **doesn't** end in `.env` is stored
+verbatim (base64 in the vault, under the reserved kv key `__file__`) and materialized
+byte-for-byte on the box. The project name **keeps the extension** — that's what
+distinguishes it from an env project of the same stem:
+
+```
+~/.config/devbox/<profile>/secrets/ramp-enablement.sql       # project ramp-enablement.sql
+~/.config/devbox/<profile>/secrets/runegate/server.pem       # project runegate.server.pem
+```
+
+Hidden files (and anything under a hidden folder) are ignored, so `.DS_Store` never
+lands in the vault. Everything else in `secrets/` is treated as a secret and pushed —
+don't keep notes or READMEs in there. An `.env` may not define a variable named
+`__file__` (it's the file-mode marker; `vault load` rejects it).
+
 With many projects the flat pool gets cluttered — you can organize `secrets/` into
 folders. Path separators join with dots to form the project name, so these are the
 **same project** (`kash-cards.deploy.prd`, the name used with `vault load`, in
@@ -190,7 +207,8 @@ tolerated.
 **`devbox up` already does all of the vault setup** — it brings OpenBao up, runs
 `init` on a fresh box (saving the unseal key + root token to
 `~/.config/devbox/vault-keys.json` on your laptop), unseals, and loads every
-`~/.config/devbox/<profile>/secrets/*.env`. The individual commands below are only for granular control:
+secret file under `~/.config/devbox/<profile>/secrets/` (`.env` and file mode alike).
+The individual commands below are only for granular control:
 
 ```sh
 devbox vault up          # start + init/unseal (same readiness as `up`)
@@ -238,11 +256,12 @@ set -a; eval "$(bao kv get -mount=secret -format=json myapp \
 Tear the box down → its vault storage and keys are gone → on the next box, `vault up` +
 `vault init` + `vault load` again (**re-init per box**: each box gets fresh keys).
 
-### On-login materialization into app `.env` files (optional)
+### On-login materialization into app `.env` / config files (optional)
 
-If your app reads a `.env` *file* (rather than env vars), devbox can materialize the vault
-secrets into those files **on SSH login** and wipe them **when your last session ends** —
-keeping plaintext only in RAM (tmpfs), never on the box's disk.
+If your app reads a `.env` *file* (rather than env vars) — or a file-mode secret like a
+`.pem`/`.sql`/`.xml` — devbox can materialize the vault secrets into those files **on SSH
+login** and wipe them **when your last session ends** — keeping plaintext only in RAM
+(tmpfs), never on the box's disk.
 
 Opt in by creating a manifest at `~/.config/devbox/<profile>/secrets.map` (copy the format from
 `deploy/secrets.map.example`) that maps each vault project to its destination path on the box.
@@ -251,15 +270,17 @@ each deployment has its own — and the dest paths are OS-specific (Linux `/home
 `C:\...`). Example (`~/.config/devbox/default/secrets.map`):
 
 ```
-frontend   /home/eddyg/apps/frontend/.env
-backend    /home/eddyg/apps/backend/.env
+frontend             /home/eddyg/apps/frontend/.env
+backend              /home/eddyg/apps/backend/.env
+ramp-enablement.sql  /home/eddyg/apps/backend/deploy/ramp-enablement.sql
 ```
 
 `configure`/`up` then installs a hook + a systemd **user** service on the box. On login it
-symlinks each project's secrets into its `.env` (a link into `/dev/shm` tmpfs); on the
-**last** logout or dropped connection it wipes them (logind reference-counts your sessions,
-so a second open session is never disturbed). The project name and the dest filename are
-independent, so many apps can each use a plain `.env` (the directory disambiguates).
+symlinks each project's secrets into its dest — KEY=value lines for an env project, the
+original bytes for a file-mode one (a link into `/dev/shm` tmpfs); on the **last** logout
+or dropped connection it wipes them (logind reference-counts your sessions, so a second
+open session is never disturbed). The project name and the dest filename are independent,
+so many apps can each use a plain `.env` (the directory disambiguates).
 
 Caveats: the vault must be **unsealed first** (`vault unseal` from your laptop) — if it's
 sealed at login the hook skips with a notice (`systemctl --user restart devbox-secrets`
