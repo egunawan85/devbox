@@ -460,6 +460,17 @@ secrets_file_for() {
   [ -n "$found" ] && printf '%s' "$found"
 }
 
+# Expand a group prefix to the projects under it: every secret file whose project
+# name starts with '<prefix>.' (dot boundary — 'runegate' never matches
+# 'runegate-infra'). One name per line, sorted; empty when nothing matches.
+projects_under() {
+  local prefix=$1 f p
+  while IFS= read -r f; do
+    p=$(proj_for_file "$f")
+    case "$p" in "$prefix".*) printf '%s\n' "$p" ;; esac
+  done < <(secrets_files | sort)
+}
+
 # Push every secret file under $SECRETS_DIR (flat or foldered, .env or file mode —
 # see proj_for_file) into the vault (used by `up`).
 vault_load_all() {
@@ -561,8 +572,20 @@ vault_load() {
   case "$proj"        in ''|-*|*[!a-zA-Z0-9._-]*) die "invalid project name: '$proj'";; esac
   case "$VAULT_MOUNT" in ''|-*|*[!a-zA-Z0-9._-]*) die "invalid VAULT_MOUNT: '$VAULT_MOUNT'";; esac
   local f
-  f=$(secrets_file_for "$proj") \
-    || die "no secrets file for '$proj' under $SECRETS_DIR — expected $proj.env (env mode) or $proj itself (file mode), flat or in folders (folders join with dots: kash-cards/deploy.prd.env == kash-cards.deploy.prd)"
+  if ! f=$(secrets_file_for "$proj"); then
+    # Not an exact project — try the name as a group prefix: 'qrypto-omni' loads
+    # every qrypto-omni.* project, so one family refreshes without pushing the
+    # whole tree.
+    local group; group=$(projects_under "$proj")
+    [ -n "$group" ] || die "no secrets file for '$proj' under $SECRETS_DIR — expected $proj.env (env mode), $proj itself (file mode), or projects under '$proj.' (group prefix); flat or in folders (folders join with dots: kash-cards/deploy.prd.env == kash-cards.deploy.prd)"
+    local p
+    while IFS= read -r p; do
+      # </dev/null: the per-project load runs ssh, which would otherwise drain
+      # the group list from the loop's stdin (same trap as vault_load_all).
+      vault_load "$p" </dev/null
+    done <<<"$group"
+    return
+  fi
   local host json; host=$(vault_host)
   case "$f" in
     *.env)

@@ -223,7 +223,9 @@ After editing a `~/.config/devbox/<profile>/secrets/<proj>.env`, `devbox vault r
 it to the vault and re-materializes the on-tmpfs `.env` in any active login session
 (it restarts `devbox-secrets.service`). With no active session it just loads the
 vault — the secret materializes on the next login. Omit the project name to refresh
-every project.
+every project, or pass a group prefix to refresh one family: `devbox vault refresh
+qrypto-omni` loads every `qrypto-omni.*` project (dot boundary — `runegate` never
+matches `runegate-infra`).
 
 If the box reboots, OpenBao **auto-starts (sealed)** via its systemd unit
 (`devbox-vault.service`), so the server is back up and `devbox vault unseal`
