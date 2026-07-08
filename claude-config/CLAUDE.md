@@ -119,9 +119,9 @@ otherwise do work on a repo, follow this workflow:
    pre-approved (isolated, reversible local branch); you may
    work and push the branch there without asking. (These rules
    are also enforced by the git-write-guard hook and
-   settings.json: add/commit and branch push auto-allow inside
-   `.claude/worktrees/`; merge, push-to-main, and everything
-   else gated.)
+   settings.json: add/commit/checkout and branch push
+   auto-allow inside `.claude/worktrees/`; merge, push-to-main,
+   and everything else gated.)
 
 ## Write for the long term
 

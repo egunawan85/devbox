@@ -11,9 +11,10 @@
 // permission flow).
 //
 // Exception: when cwd is inside a worktree under .claude/worktrees/ AND the command's
-// only git write ops are commit/push (no wrapper, no other write op), it emits
+// only git write ops are commit/push/checkout (no wrapper, no other write op), it emits
 // "allow" instead — a worktree is an isolated feature branch, so committing there can't
-// touch main, and pushing it just publishes that branch for PR review (never a merge).
+// touch main, pushing it just publishes that branch for PR review (never a merge), and
+// checkout only moves that worktree's own HEAD / discards its own isolated files.
 // A push that targets main/master still asks, as does any mixed/gated/wrapped command.
 //
 // One cross-OS implementation: run via `node` on Linux, Windows, and macOS.
@@ -32,8 +33,10 @@ const WRITE_SUBS = new Set([
 
 // Write subcommands that are pre-approved when cwd is inside a git worktree under
 // .claude/worktrees/ — a worktree is on its own isolated feature branch, so committing
-// there can't touch main, and pushing that branch only publishes it for PR review.
-const WORKTREE_OK = new Set(['commit', 'push']);
+// there can't touch main, pushing that branch only publishes it for PR review, and
+// checkout can only move that worktree's own HEAD or restore files within it (git
+// refuses to check out a branch that's already checked out elsewhere, e.g. main).
+const WORKTREE_OK = new Set(['commit', 'push', 'checkout']);
 
 // A push that names main/master as a target bypasses the merge-to-main gate, so it must
 // always ask — even from inside a worktree. Matches `... main`, `... master`, `:main`,
@@ -48,6 +51,12 @@ const OPT_WITH_ARG = new Set([
   '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path',
   '--config-env', '--super-prefix',
 ]);
+
+// git global options that redirect the command at another repo/checkout. From a
+// worktree cwd these can aim a "worktree" write back at the MAIN checkout
+// (git -C <main> checkout -- .), so the worktree auto-allow must not trust cwd
+// when one of these targets a path outside .claude/worktrees/.
+const REDIRECT_OPTS = new Set(['-C', '--git-dir', '--work-tree']);
 
 // Shell wrappers whose argument payload is another command — a bypass vector when the
 // payload is a git write (sh -c 'git push', eval 'git ...', xargs git ...). A wrapper
@@ -121,15 +130,24 @@ function segmentHasWrapper(segment) {
 }
 
 // Resolve the git subcommand a single command segment runs, or null if it isn't git.
-function gitSubcommand(segment) {
+// When `redirs` is given, the values of repo-redirecting global options (REDIRECT_OPTS)
+// are collected into it so the caller can veto the worktree auto-allow.
+function gitSubcommand(segment, redirs) {
   const [leaf, rest] = execHead(segment);
   if (leaf !== 'git' && leaf !== 'git.exe') return null;
   const tokens = rest.split(/\s+/).filter(Boolean);
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i];
-    if (OPT_WITH_ARG.has(t)) { i += 2; continue; } // option + its separate value
-    if (/^--[^=]+=/.test(t)) { i += 1; continue; } // --opt=value
+    if (OPT_WITH_ARG.has(t)) {                      // option + its separate value
+      if (redirs && REDIRECT_OPTS.has(t)) redirs.push(tokens[i + 1] ?? '');
+      i += 2; continue;
+    }
+    if (/^--[^=]+=/.test(t)) {                      // --opt=value
+      const eq = t.indexOf('=');
+      if (redirs && REDIRECT_OPTS.has(t.slice(0, eq))) redirs.push(t.slice(eq + 1));
+      i += 1; continue;
+    }
     if (t.startsWith('-')) { i += 1; continue; }   // other global flags
     return t.toLowerCase();                         // first non-option = subcommand
   }
@@ -212,10 +230,18 @@ function main() {
   };
 
   const subs = [];
+  const redirs = [];
   for (const seg of segments) {
-    const sub = gitSubcommand(seg);
+    const sub = gitSubcommand(seg, redirs);
     if (sub && WRITE_SUBS.has(sub)) subs.push(sub);
   }
+
+  // Any git segment redirected at a repo outside .claude/worktrees/ (or at an
+  // unparseable target — quoted paths with spaces land here) voids the worktree
+  // auto-allow: cwd no longer proves the write stays inside the worktree.
+  const redirectsOutside = redirs.some(
+    (p) => !/\.claude\/worktrees\//.test(slash(p.replace(/^['"]+|['"]+$/g, ''))),
+  );
 
   // Wrapper fallback (defends against bypasses where git isn't the segment's leaf):
   //   sh -c 'git push' · bash -c "git push" · eval 'git push' · xargs git push
@@ -240,12 +266,13 @@ function main() {
   const gated = [...subs, ...(wrapperSub ? [wrapperSub] : [])];
   if (gated.length === 0) process.exit(0);            // no git write -> defer
 
-  // Auto-allow ONLY if: in a worktree, no wrapper obscuring intent, and every
-  // detected write op is commit/push. Otherwise fail closed to "ask".
+  // Auto-allow ONLY if: in a worktree, no wrapper obscuring intent, no redirect
+  // aiming git outside the worktree, and every detected write op is
+  // commit/push/checkout. Otherwise fail closed to "ask".
   const onlyWorktreeOps = !wrapperSub && subs.length > 0 &&
                           subs.every((s) => WORKTREE_OK.has(s));
   const pushesToMain = subs.includes('push') && PUSH_TO_MAIN.test(cmd);
-  if (inWorktree && onlyWorktreeOps && !pushesToMain) allow(subs.join('+'));
+  if (inWorktree && onlyWorktreeOps && !redirectsOutside && !pushesToMain) allow(subs.join('+'));
   else ask(gated[0]);
 }
 

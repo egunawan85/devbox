@@ -12,6 +12,7 @@
             "Read",
             "Grep",
             "Glob",
+            "Skill(win-test)",
             "Edit(//**/.git/info/exclude)",
             "Write(//**/.git/info/exclude)"
         ],
