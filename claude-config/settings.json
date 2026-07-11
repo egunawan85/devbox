@@ -14,7 +14,9 @@
             "Glob",
             "Skill(win-test)",
             "Edit(//**/.git/info/exclude)",
-            "Write(//**/.git/info/exclude)"
+            "Write(//**/.git/info/exclude)",
+            "Edit(//**/.claude/worktrees/**)",
+            "Write(//**/.claude/worktrees/**)"
         ],
         "deny":
         [
