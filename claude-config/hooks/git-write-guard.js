@@ -11,11 +11,13 @@
 // permission flow).
 //
 // Exception: when cwd is inside a worktree under .claude/worktrees/ AND the command's
-// only git write ops are commit/push/checkout (no wrapper, no other write op), it emits
-// "allow" instead — a worktree is an isolated feature branch, so committing there can't
-// touch main, pushing it just publishes that branch for PR review (never a merge), and
-// checkout only moves that worktree's own HEAD / discards its own isolated files.
-// A push that targets main/master still asks, as does any mixed/gated/wrapped command.
+// only git write ops are local-branch operations (commit/push/checkout/switch/restore/
+// merge/reset/rebase/cherry-pick/revert/rm/mv/apply/am/stash/pull — no wrapper, no other
+// write op), it emits "allow" instead — a worktree is an isolated feature branch, so
+// these ops can only move that worktree's own HEAD / index / files, and git refuses to
+// move a branch (e.g. main) that is checked out elsewhere. Pushing just publishes the
+// branch for PR review (never a merge). clone and clean stay gated everywhere, a push
+// that targets main/master still asks, as does any mixed/gated/wrapped command.
 //
 // One cross-OS implementation: run via `node` on Linux, Windows, and macOS.
 
@@ -32,11 +34,18 @@ const WRITE_SUBS = new Set([
 ]);
 
 // Write subcommands that are pre-approved when cwd is inside a git worktree under
-// .claude/worktrees/ — a worktree is on its own isolated feature branch, so committing
-// there can't touch main, pushing that branch only publishes it for PR review, and
-// checkout can only move that worktree's own HEAD or restore files within it (git
-// refuses to check out a branch that's already checked out elsewhere, e.g. main).
-const WORKTREE_OK = new Set(['commit', 'push', 'checkout']);
+// .claude/worktrees/ — a worktree is on its own isolated feature branch, and every op
+// here can only move that worktree's own HEAD, index, or files (git refuses to move a
+// branch that's already checked out elsewhere, e.g. main). History edits stay
+// reflog-recoverable; push only publishes the branch for PR review (push-to-main is
+// vetoed separately below). Deliberately absent: `clone` (network, creates repos at
+// arbitrary paths) and `clean` (deletes untracked files — `-x` would sweep symlinked
+// prereqs like .env/node_modules and ./tmp scratch, not reflog-recoverable).
+const WORKTREE_OK = new Set([
+  'commit', 'push', 'checkout', 'switch', 'restore', 'merge', 'reset',
+  'rebase', 'cherry-pick', 'revert', 'rm', 'mv', 'apply', 'am', 'stash',
+  'pull',
+]);
 
 // A push that names main/master as a target bypasses the merge-to-main gate, so it must
 // always ask — even from inside a worktree. Matches `... main`, `... master`, `:main`,
