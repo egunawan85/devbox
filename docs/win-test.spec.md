@@ -19,6 +19,8 @@ Each requirement is observable — you can check whether a given setup satisfies
   deallocated when idle (§L1), so idle cost is zero regardless, and runs want full
   throughput. Size/region are configurable per [devbox.spec P3].
 - **R4** The box carries the **test engine** (.NET SDK + MSBuild + SQL Server LocalDB +
+  SQL Server Express listening on `localhost:1433` with loopback integrated auth — the
+  E2E deploy's DB target, which LocalDB's port-less user-mode instance can't serve +
   OpenSSH server + `rsync`), **not** the project source. Source arrives per run (§S).
 
 ## L — Lifecycle (the box owns it)
@@ -65,8 +67,12 @@ Each requirement is observable — you can check whether a given setup satisfies
   (§X2) **and Fixtures** — `*.Tests.Fixtures` is the shared test-data/helpers library
   the suites borrow from, not a runnable suite; it executes zero tests and would
   otherwise trip §X5's fail-loud rule.
-- **X2** The **E2E/Playwright staging suite is out of scope** here — it needs a live
-  staging env and real secrets, and runs as a scheduled GitHub Action.
+- **X2** The **staging** E2E/Playwright run stays **out of scope** here — it needs a live
+  staging env and real secrets, and runs as a scheduled GitHub Action. A **local** E2E run
+  is in scope via `--suite e2e`, which routes past the generic runner to the repo's own
+  box-side runner (`scripts/win-test-e2e.ps1`): it deploys the IIS stack + SPA on the box
+  and runs Playwright against the local origin, using the §R4 SQL Server on
+  `localhost:1433`.
 - **X3** Runs are **credential-free**: no vault materialization in the hot path (the
   in-scope suites are hermetic — LocalDB integrated auth, in-process `TestServer`, mocked
   externals, in-test secret injection).

@@ -4,8 +4,11 @@
 # at first boot, to keep provision.ps1 small and because these installs are long (VS Build
 # Tools alone is ~20 min). Installs the classic .NET Framework build stack the repos need:
 # VS 2022 Build Tools (Web workload + FW 4.7.2/4.6.2 targeting packs), NuGet CLI, SQL Server
-# Express (mixed-mode + TCP, for the repos' SQL auth), PowerShell 7, Azure CLI, go-sqlcmd,
-# rsync (the receive end of the win-test per-run source sync).
+# Express LocalDB (the unit/integration suites), SQL Server Express with TCP pinned to
+# localhost:1433 (loopback integrated auth -- the qrypto-omni E2E deploy runs its DB ops
+# against `localhost,1433 -E`, which LocalDB's dynamic user-mode instance can't serve),
+# PowerShell 7, Azure CLI, go-sqlcmd, rsync (the receive end of the win-test per-run
+# source sync).
 #
 # winget is absent on Windows Server 2022, so this uses Chocolatey (installed by
 # provision.ps1) + direct vendor installers. Idempotent where the installers allow.
@@ -68,6 +71,51 @@ try {
   & SqlLocalDB.exe create MSSQLLocalDB 2>$null
   & SqlLocalDB.exe start  MSSQLLocalDB 2>$null
   Write-Output "LocalDB instance MSSQLLocalDB ready -- connect via (localdb)\MSSQLLocalDB"
+
+  # --- SQL Server Express: a real TCP endpoint on localhost:1433 (the E2E deploy needs it) ---
+  # Additive to the LocalDB above: the unit/integration suites keep (localdb)\MSSQLLocalDB,
+  # but the qrypto-omni E2E deploy (deploy-iis.ps1) runs its DB ops against `localhost,1433
+  # -E` -- LocalDB has no fixed TCP port and cannot satisfy that. Loopback-only exposure: the
+  # NSG opens nothing but SSH and Windows Firewall does not filter loopback, so no inbound
+  # rule is added. Integrated auth only, no SQL logins: Express setup makes the installing
+  # user (SYSTEM, under run-command) sysadmin, and BUILTIN\Administrators is granted below
+  # so the SSH user's trusted connections work.
+  if (-not (Get-Service 'MSSQL$SQLEXPRESS' -ErrorAction SilentlyContinue)) {
+    & $choco install -y --no-progress sql-server-express
+    if ($LASTEXITCODE -ne 0) { throw "SQL Server Express (choco) install failed: exit $LASTEXITCODE" }
+    Get-Service 'MSSQL$SQLEXPRESS' -ErrorAction Stop | Out-Null
+    Write-Output 'SQL Server Express installed (service MSSQL$SQLEXPRESS)'
+  } else { Write-Output 'SQL Server Express already present -- skipping install' }
+  # A named instance defaults to TCP disabled / a dynamic port; pin a static 1433. With the
+  # default ListenOnAllIPs=1 the engine reads the IPAll pair. The settings only take effect
+  # on service (re)start, hence the unconditional restart (cheap; this layer re-runs only
+  # when this script changes).
+  $sqlInst = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').SQLEXPRESS
+  $tcpKey  = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$sqlInst\MSSQLServer\SuperSocketNetLib\Tcp"
+  Set-ItemProperty -Path $tcpKey -Name Enabled -Value 1
+  Set-ItemProperty -Path "$tcpKey\IPAll" -Name TcpDynamicPorts -Value ''
+  Set-ItemProperty -Path "$tcpKey\IPAll" -Name TcpPort -Value '1433'
+  Set-Service 'MSSQL$SQLEXPRESS' -StartupType Automatic
+  Restart-Service 'MSSQL$SQLEXPRESS' -Force
+  # Trusted connections for the SSH user: the devbox user is a box Administrator, so grant
+  # sysadmin to the BUILTIN\Administrators group login (no per-user login to keep in sync;
+  # ALTER SERVER ROLE ADD MEMBER is a no-op when already a member). Retried because the
+  # engine accepts TCP a few seconds after the service reports Running; on success this
+  # doubles as the fail-loud proof that 1433 + integrated auth actually work.
+  $grantSql = "IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'BUILTIN\Administrators') CREATE LOGIN [BUILTIN\Administrators] FROM WINDOWS; ALTER SERVER ROLE sysadmin ADD MEMBER [BUILTIN\Administrators];"
+  $sqlUp = $false
+  # EAP=Continue for the probes only: sqlcmd writes its connect errors to stderr, which the
+  # script-wide EAP=Stop would turn into a throw on the FIRST warm-up failure instead of a
+  # retry. $LASTEXITCODE is the verdict that matters.
+  $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  foreach ($i in 1..12) {
+    & sqlcmd -S 'localhost,1433' -E -Q $grantSql 2>$null
+    if ($LASTEXITCODE -eq 0) { $sqlUp = $true; break }
+    Start-Sleep -Seconds 5
+  }
+  $ErrorActionPreference = $prevEap
+  if (-not $sqlUp) { throw 'SQL Server Express is not reachable on localhost,1433 with integrated auth after install' }
+  Write-Output 'SQL Server Express listening on localhost:1433 (integrated auth verified)'
 
   # Restart sshd so new SSH sessions pick up the updated machine PATH (pwsh/az/sqlcmd were
   # added by MSI after sshd captured its environment at provision time).

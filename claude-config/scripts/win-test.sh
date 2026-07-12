@@ -14,7 +14,7 @@
 # just queue on a box-side lock). See the spec's Concurrency section.
 #
 # Usage:
-#   win-test.sh [<worktree>] [--suite unit|integration|smoke|all] [--clean]
+#   win-test.sh [<worktree>] [--suite unit|integration|smoke|all|e2e] [--clean]
 #     <worktree>   path to the checkout to test (default: the current git worktree root)
 #     --suite      which suite to run (default: integration)
 #     --clean      wipe this branch's synced dir on the box first (cold build)
@@ -61,7 +61,7 @@ while [ $# -gt 0 ]; do
     *)  WORKTREE="$1"; shift ;;
   esac
 done
-case "$SUITE" in unit|integration|smoke|all) ;; *) die "bad --suite: $SUITE" ;; esac
+case "$SUITE" in unit|integration|smoke|all|e2e) ;; *) die "bad --suite: $SUITE" ;; esac
 
 # Default to the current worktree's root (so `cd <worktree>; /win-test` just works).
 if [ -z "$WORKTREE" ]; then
@@ -102,6 +102,14 @@ done
 
 # --- 3. sync the worktree (warm, incremental) -----------------------------------
 DEST="$CI_DIR/$SAFE_BRANCH"
+# A suite may ship its own box-side runner in the repo (scripts/win-test-<suite>.ps1).
+# The E2E suite does: it deploys the full IIS stack + SPA and runs Playwright against it —
+# work the generic runner (which only does nuget/msbuild/dotnet-test) can't do. Route to
+# the repo-local runner so all that logic lives in the repo, versioned with the tests.
+# (The default WIN_TEST_REMOTE_RUNNER override still wins if set explicitly.)
+if [ -z "${WIN_TEST_REMOTE_RUNNER:-}" ] && [ "$SUITE" = "e2e" ]; then
+  REMOTE_RUNNER="$DEST/scripts/win-test-e2e.ps1"
+fi
 # The box's rsync (cwRsync) is cygwin: it reads "C:/ci/…" as a RELATIVE path (prefixing
 # $HOME), so rsync gets the /cygdrive/c/… spelling while PowerShell keeps the C:/… one.
 win2cyg() {

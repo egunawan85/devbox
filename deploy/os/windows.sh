@@ -218,7 +218,7 @@ os_install_toolchain() {
   # Guard: a non-ASCII byte (e.g. an em-dash) is read on the box as Windows-1252, where 0x94
   # becomes a smart-quote that closes a PowerShell string early and breaks the whole script.
   perl -ne 'exit 1 if /[^\x00-\x7f]/' "$script" || die "toolchain.ps1 contains non-ASCII bytes (they corrupt over run-command) -- make it pure ASCII"
-  log "installing project toolchain on $host (VS Build Tools + Test Tools + SQL LocalDB + NuGet/PS7/Azure CLI/rsync; ~20-30 min fresh, minutes to re-converge)"
+  log "installing project toolchain on $host (VS Build Tools + Test Tools + SQL LocalDB + SQL Express on 1433 + NuGet/PS7/Azure CLI/rsync; ~20-30 min fresh, minutes to re-converge)"
   az vm run-command invoke -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
     --command-id RunPowerShellScript --scripts "@$script" --query "value[].message" -o tsv \
     || die "toolchain install (run-command) failed -- see C:\\devbox-toolchain.log on the box"
