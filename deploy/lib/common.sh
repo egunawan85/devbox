@@ -383,7 +383,7 @@ ensure_sealer_token() {
     set -eu; umask 077
     export BAO_ADDR=http://127.0.0.1:8200
     tf="$HOME/.config/devbox/seal-token"
-    if [ -s "$tf" ] && BAO_TOKEN="$(cat "$tf")" bao token renew-self >/dev/null 2>&1; then
+    if [ -s "$tf" ] && BAO_TOKEN="$(cat "$tf")" bao token renew >/dev/null 2>&1; then
       cat >/dev/null   # drain the unused root token from stdin
       exit 0
     fi
@@ -417,7 +417,7 @@ ensure_app_token() {
     envf="$HOME/.config/devbox/vault.env"
     cur=""
     [ -f "$envf" ] && cur=$( . "$envf" 2>/dev/null; printf "%s" "${BAO_TOKEN:-}" )
-    if [ -n "$cur" ] && BAO_TOKEN="$cur" bao token renew-self >/dev/null 2>&1; then
+    if [ -n "$cur" ] && BAO_TOKEN="$cur" bao token renew >/dev/null 2>&1; then
       cat >/dev/null   # drain the unused root token from stdin
       echo "app token: valid — 768h period renewed"
       exit 0
