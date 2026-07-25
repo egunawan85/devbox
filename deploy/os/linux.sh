@@ -98,6 +98,10 @@ case "${1:-}" in
       echo "devbox-secrets: vault sealed/down — unseal from your laptop, then: systemctl --user restart devbox-secrets" >&2
       exit 0
     fi
+    # The token is periodic (768h): renew on every materialization so routine use keeps
+    # it alive. A dead one heals on the next laptop unseal (ensure_app_token).
+    bao token renew-self >/dev/null 2>&1 \
+      || echo "devbox-secrets: token renew failed (expired?) — run 'devbox vault unseal' from the laptop to re-issue it" >&2
     mkdir -p "$RAM"; chmod 700 "$RAM"
     while read -r proj dest rest || [ -n "$proj" ]; do   # || ... = also handle a final line with no trailing newline
       case "$proj" in ''|\#*) continue ;; esac

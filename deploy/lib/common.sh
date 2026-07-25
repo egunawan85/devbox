@@ -376,12 +376,17 @@ ensure_sealer_token() {
   [ -n "$root" ] && [ "$root" != null ] || die "could not read root token from $VAULT_KEYS_FILE"
   # Inline command (NOT a heredoc) so the root token piped on stdin reaches `$(cat)`; the
   # policy goes via a temp file (not secret) so it doesn't compete for stdin. Token stays
-  # off argv. Idempotent: no-op if a seal-token already exists.
+  # off argv. Idempotent: an existing VALID seal-token is renewed (768h period reset) and
+  # kept; a dead one (expired unrenewed — the timer would fail-open, vault left unsealed)
+  # is re-minted.
   printf '%s' "$root" | ssh_box "$host" '
     set -eu; umask 077
     export BAO_ADDR=http://127.0.0.1:8200
     tf="$HOME/.config/devbox/seal-token"
-    [ -s "$tf" ] && exit 0
+    if [ -s "$tf" ] && BAO_TOKEN="$(cat "$tf")" bao token renew-self >/dev/null 2>&1; then
+      cat >/dev/null   # drain the unused root token from stdin
+      exit 0
+    fi
     export BAO_TOKEN="$(cat)"
     mkdir -p "$HOME/.config/devbox"
     pol=$(mktemp)
@@ -391,6 +396,40 @@ ensure_sealer_token() {
     tok=$(bao token create -policy=devbox-sealer -period=768h -format=json | jq -r .auth.client_token)
     [ -n "$tok" ] && [ "$tok" != null ] || { echo SEALER_TOKEN_FAILED >&2; exit 1; }
     printf "%s" "$tok" > "$tf"; chmod 600 "$tf"
+  '
+}
+
+# Validate the box's scoped app token (vault.env), resetting its 768h period; if it's
+# dead (periodic tokens expire when nothing renews them within the period — an idle box
+# loses ALL secret reads after 32 days), re-mint it from the laptop's root token. Called
+# on every unseal, so a lapsed token heals itself the next time you open the vault
+# instead of requiring manual surgery. Root travels on stdin (never argv), same as
+# ensure_sealer_token.
+ensure_app_token() {
+  local host=$1
+  [ "$OS" = windows ] && return 0   # win-test vault lifecycle is PowerShell-native (os/windows.sh)
+  [ -f "$VAULT_KEYS_FILE" ] || die "no $VAULT_KEYS_FILE — can't verify/re-mint the app token (init first)"
+  local root; root=$(jq -r '.root_token' "$VAULT_KEYS_FILE")
+  [ -n "$root" ] && [ "$root" != null ] || die "could not read root token from $VAULT_KEYS_FILE"
+  printf '%s' "$root" | ssh_box "$host" '
+    set -eu; umask 077
+    export BAO_ADDR=http://127.0.0.1:8200
+    envf="$HOME/.config/devbox/vault.env"
+    cur=""
+    [ -f "$envf" ] && cur=$( . "$envf" 2>/dev/null; printf "%s" "${BAO_TOKEN:-}" )
+    if [ -n "$cur" ] && BAO_TOKEN="$cur" bao token renew-self >/dev/null 2>&1; then
+      cat >/dev/null   # drain the unused root token from stdin
+      echo "app token: valid — 768h period renewed"
+      exit 0
+    fi
+    export BAO_TOKEN="$(cat)"
+    apptok=$(bao token create -policy=devbox-app -period=768h -format=json | jq -r .auth.client_token)
+    [ -n "$apptok" ] && [ "$apptok" != null ] || { echo APP_TOKEN_CREATE_FAILED >&2; exit 1; }
+    mkdir -p "$HOME/.config/devbox"
+    printf "export BAO_ADDR=%s\nexport BAO_TOKEN=%s\n" "$BAO_ADDR" "$apptok" > "$envf"
+    printf "%s" "$apptok" > "$HOME/.bao-token"
+    chmod 600 "$envf" "$HOME/.bao-token"
+    echo "app token: was dead — re-minted (768h period)"
   '
 }
 
@@ -409,7 +448,10 @@ vault_bringup() {
   sealed=$(printf '%s' "$status" | jq -r '.sealed'      2>/dev/null || echo true)
   if   [ "$inited" != "true"  ]; then vault_init
   elif [ "$sealed" != "false" ]; then vault_unseal
-  else log "vault already initialized + unsealed."; fi
+  else
+    log "vault already initialized + unsealed."
+    ensure_app_token "$host"   # heal/renew the box token even when no unseal was needed
+  fi
   os_autoseal_arm "$host"   # (re)arm the auto-seal timer if AUTOSEAL_TTL is set
 }
 
@@ -561,6 +603,7 @@ vault_unseal() {
   [ "$(printf '%s' "$resp" | jq -r '.sealed' 2>/dev/null)" = "false" ] \
     || die "unseal failed (vault still sealed) — verify the key in $VAULT_KEYS_FILE matches this box"
   log "vault unsealed."
+  ensure_app_token "$host"  # renew (or re-mint) the box's 768h app token while root is in hand
   os_autoseal_arm "$host"   # (re)arm the auto-seal timer if AUTOSEAL_TTL is set
 }
 
