@@ -82,6 +82,19 @@ try {
   Write-Host "win-test-run: ensuring MSSQLLocalDB is started…"
   & SqlLocalDB start MSSQLLocalDB | Out-Null
 
+  # QryptoOmni.Tests.Integration (PR #214) defaults to the shared Docker SQL Server on
+  # 127.0.0.1:1433 and — by design — does NOT fall back to LocalDB when that engine is
+  # absent. This appliance only stands up LocalDB (above), so point QO's suite at the
+  # built-in Windows-auth opt-in it ships for exactly this case. Scoped to the QO repo:
+  # these QO_TEST_DB_* vars are unread by the runegate / kash-cards suites that share
+  # this runner, but the guard keeps it self-documenting. To instead test the same
+  # engine CI uses, stand up runegate2-db-sqlserver-1 on :1433 and unset these.
+  if (Test-Path (Join-Path $RepoDir 'QryptoOmni.Tests.Integration')) {
+    Write-Host "win-test-run: QryptoOmni repo — routing integration suite to LocalDB (QO_TEST_DB_INTEGRATED_SECURITY)."
+    $env:QO_TEST_DB_INTEGRATED_SECURITY = '1'
+    $env:QO_TEST_DB_SERVER = '(localdb)\MSSQLLocalDB'
+  }
+
   # --- 3. run the suite ----------------------------------------------------------
   # These are CLASSIC (packages.config) net4x solutions, so the recipe is the repos' own
   # (runegate audit/TEST_STRATEGY.md + CLAUDE.md): nuget restore -> msbuild build ->
