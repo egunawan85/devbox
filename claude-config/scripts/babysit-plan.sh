@@ -28,7 +28,7 @@ set -euo pipefail
 
 MAX_PRS_PER_PASS=3
 QUIET_PERIOD_MINUTES=5
-TARGET_BRANCH=main
+TARGET_BRANCH="${TARGET_BRANCH:-main}"
 MARKER_PREFIX='<!-- runegate-redteam'
 
 command -v gh >/dev/null 2>&1 || { echo "babysit-plan: 'gh' not found on PATH" >&2; exit 127; }
