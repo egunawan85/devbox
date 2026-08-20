@@ -95,17 +95,21 @@ try {
     $env:QO_TEST_DB_SERVER = '(localdb)\MSSQLLocalDB'
   }
 
-  # The PGCrypto.Tests.Unit SideHeader tests read API_APP_URL in a type initializer and
-  # all die before running when it's absent — the value normally comes from the repo's
-  # .env, which is gitignored and never syncs to the box (runegate#1681). They only
-  # exercise formatting, so any well-formed URL satisfies them. Synthesize one when the
-  # synced repo carries that project, but never clobber a value already in the environment.
-  if (-not $env:API_APP_URL) {
-    $needsApiUrl = Get-ChildItem -Path $RepoDir -Recurse -Filter 'PGCrypto.Tests.Unit.csproj' -ErrorAction SilentlyContinue |
-                   Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' } | Select-Object -First 1
-    if ($needsApiUrl) {
-      Write-Host "win-test-run: exporting synthetic API_APP_URL for PGCrypto.Tests.Unit (runegate#1681)"
-      $env:API_APP_URL = 'http://localhost:9999/'
+  # A synced repo may declare the env its tests need in scripts/win-test.env — simple
+  # KEY=VALUE lines; blank lines and # comments ignored. Each key is set for this process
+  # only when the environment doesn't already provide it, so an operator-set value always
+  # wins. The runner stays agnostic to which repo it tests: it names no repos and no
+  # variables, and only honors what the repo declares, versioned alongside its tests.
+  $repoEnvFile = Join-Path $RepoDir 'scripts\win-test.env'
+  if (Test-Path $repoEnvFile) {
+    Write-Host "win-test-run: applying repo-declared test env from $repoEnvFile"
+    foreach ($line in Get-Content $repoEnvFile) {
+      $line = $line.Trim()
+      if (-not $line -or $line.StartsWith('#')) { continue }
+      $k, $v = $line -split '=', 2
+      $k = $k.Trim()
+      if ($null -eq $v -or -not $k) { Write-Host "win-test-run:   skipping malformed line: $line"; continue }
+      if (-not (Test-Path "Env:$k")) { Set-Item -Path "Env:$k" -Value $v.Trim() }
     }
   }
 
