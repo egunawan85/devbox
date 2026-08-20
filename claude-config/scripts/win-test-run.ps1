@@ -95,6 +95,20 @@ try {
     $env:QO_TEST_DB_SERVER = '(localdb)\MSSQLLocalDB'
   }
 
+  # The PGCrypto.Tests.Unit SideHeader tests read API_APP_URL in a type initializer and
+  # all die before running when it's absent — the value normally comes from the repo's
+  # .env, which is gitignored and never syncs to the box (runegate#1681). They only
+  # exercise formatting, so any well-formed URL satisfies them. Synthesize one when the
+  # synced repo carries that project, but never clobber a value already in the environment.
+  if (-not $env:API_APP_URL) {
+    $needsApiUrl = Get-ChildItem -Path $RepoDir -Recurse -Filter 'PGCrypto.Tests.Unit.csproj' -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' } | Select-Object -First 1
+    if ($needsApiUrl) {
+      Write-Host "win-test-run: exporting synthetic API_APP_URL for PGCrypto.Tests.Unit (runegate#1681)"
+      $env:API_APP_URL = 'http://localhost:9999/'
+    }
+  }
+
   # --- 3. run the suite ----------------------------------------------------------
   # These are CLASSIC (packages.config) net4x solutions, so the recipe is the repos' own
   # (runegate audit/TEST_STRATEGY.md + CLAUDE.md): nuget restore -> msbuild build ->
