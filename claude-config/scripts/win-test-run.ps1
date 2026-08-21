@@ -120,26 +120,34 @@ try {
   # PackageReference restore and would fail on packages.config). Tool paths resolve via
   # vswhere (VS BuildTools). Verified/tuned on the first Slice-1 run against a real box.
 
-  # Prefer a dedicated *.Tests.sln (kash-cards has one); else the single root *.sln.
-  $sln = Get-ChildItem $RepoDir -Filter *.Tests.sln -ErrorAction SilentlyContinue | Select-Object -First 1
-  if (-not $sln) { $sln = Get-ChildItem $RepoDir -Filter *.sln -ErrorAction SilentlyContinue | Select-Object -First 1 }
-  if (-not $sln) { throw "win-test-run: no .sln found under $RepoDir" }
+  # Which solution(s) to build. A dedicated *.Tests.sln (kash-cards has one) is
+  # self-contained, so it wins outright. Otherwise build EVERY root *.sln, not just
+  # the first: the test-project glob below spans the whole repo, and a repo can carry
+  # more than one root solution (runegate post-admin-v2 has both Runegate.sln and the
+  # net8 PGCrypto.Admin.Api.sln). Building only the alphabetically-first one left the
+  # other solution's test DLLs unbuilt, so `dotnet test --no-build` reported them as
+  # "test source file not found" — a spurious failure that looked like a suite verdict.
+  $slns = Get-ChildItem $RepoDir -Filter *.Tests.sln -ErrorAction SilentlyContinue
+  if (-not $slns) { $slns = Get-ChildItem $RepoDir -Filter *.sln -ErrorAction SilentlyContinue }
+  if (-not $slns) { throw "win-test-run: no .sln found under $RepoDir" }
 
   $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
   $msbuild = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild `
                         -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
   if (-not $msbuild) { throw "win-test-run: MSBuild not found via vswhere" }
 
-  Write-Host "win-test-run: nuget restore $($sln.Name)"
-  & nuget restore $sln.FullName -NonInteractive
-  if ($LASTEXITCODE -ne 0) { throw "win-test-run: nuget restore failed ($LASTEXITCODE)" }
-  Touch-Heartbeat
+  foreach ($sln in $slns) {
+    Write-Host "win-test-run: nuget restore $($sln.Name)"
+    & nuget restore $sln.FullName -NonInteractive
+    if ($LASTEXITCODE -ne 0) { throw "win-test-run: nuget restore failed for $($sln.Name) ($LASTEXITCODE)" }
+    Touch-Heartbeat
 
-  Write-Host "win-test-run: msbuild build $($sln.Name)"
-  & $msbuild $sln.FullName /t:Build /p:Configuration=Debug /m /verbosity:minimal `
-      *>&1 | Tee-Object -FilePath (Join-Path $results 'build.log')
-  if ($LASTEXITCODE -ne 0) { throw "win-test-run: msbuild build failed ($LASTEXITCODE)" }
-  Touch-Heartbeat
+    Write-Host "win-test-run: msbuild build $($sln.Name)"
+    & $msbuild $sln.FullName /t:Build /p:Configuration=Debug /m /verbosity:minimal `
+        *>&1 | Tee-Object -FilePath (Join-Path $results 'build.log') -Append
+    if ($LASTEXITCODE -ne 0) { throw "win-test-run: msbuild build failed for $($sln.Name) ($LASTEXITCODE)" }
+    Touch-Heartbeat
+  }
 
   # Select test projects by naming convention (*.Tests.<Suite>.csproj); 'all' runs every
   # *.Tests.*.csproj EXCEPT E2E (live staging + real secrets — the scheduled GH Action's
