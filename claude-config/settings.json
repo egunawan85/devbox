@@ -11,14 +11,10 @@
       "Glob",
       "Skill(win-test)",
       "Edit(//**/.git/info/exclude)",
-      "Write(//**/.git/info/exclude)",
-      "Edit(//**/.claude/worktrees/**)",
-      "Write(//**/.claude/worktrees/**)"
+      "Edit(//**/.claude/worktrees/**)"
     ],
     "deny": [
-      "Write(/tmp/**)",
       "Edit(/tmp/**)",
-      "Write(/var/tmp/**)",
       "Edit(/var/tmp/**)",
       "Bash(cd)",
       "Bash(cd /*)",
