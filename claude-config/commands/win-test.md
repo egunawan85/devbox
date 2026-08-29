@@ -1,6 +1,6 @@
 ---
 description: Run this worktree's Windows-only test suite on the ephemeral Azure appliance and report the real result.
-argument-hint: '[--suite unit|integration|smoke|all|e2e] [--clean] [worktree]  (default: integration, current worktree)'
+argument-hint: '[--suite unit|integration|smoke|all|e2e|modern] [--clean] [worktree]  (default: integration, current worktree)'
 allowed-tools: Bash(~/.claude/scripts/win-test.sh:*), Read, Grep, Glob
 ---
 
@@ -24,6 +24,11 @@ current git worktree; default suite is `integration`. The script:
   `WIN_TEST_TIMEOUT` (default 60 min) it aborts with diagnostics instead of hanging,
 - fetches the TRX + console logs into `./tmp/win-test/`,
 - leaves the box running; it self-deallocates after it's been idle a while.
+
+`--suite modern` selects the SDK-style test projects — the ones named `<Project>.Tests.csproj`,
+which match none of the classic `*.Tests.<suite>.csproj` globs. Unlike the classic suites (which
+the runner prebuilds with nuget/msbuild), these are built by `dotnet test` itself, since not all
+of them belong to a root `.sln`.
 
 `--suite e2e` is special: instead of the generic nuget/msbuild/dotnet-test runner it routes
 to the repo's own box-side runner (`scripts/win-test-e2e.ps1`), which deploys the full IIS

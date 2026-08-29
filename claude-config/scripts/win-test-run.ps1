@@ -28,14 +28,14 @@
   a silent pass (spec §X5).
 
 .PARAMETER RepoDir   The synced worktree on the box, e.g. C:\ci\my-branch.
-.PARAMETER Suite     unit | integration | smoke | all  (default: integration)
+.PARAMETER Suite     unit | integration | smoke | all | modern  (default: integration)
 .PARAMETER RunId     Opaque id echoed into done.json so the orchestrator can tell this
                      run's sentinel from a stale one. Optional.
 #>
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)] [string] $RepoDir,
-  [ValidateSet('unit','integration','smoke','all')] [string] $Suite = 'integration',
+  [ValidateSet('unit','integration','smoke','all','modern')] [string] $Suite = 'integration',
   [string] $RunId = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -154,9 +154,22 @@ try {
   # job, not this appliance's — spec §X2) and Fixtures (the shared test-data/helpers
   # library the suites borrow from — not a runnable suite: it carries no test adapter,
   # so it executes zero tests and would trip the §X5 zero-tests-fails-loud rule).
-  $pattern = if ($Suite -eq 'all') { '*.Tests.*.csproj' } else { "*.Tests.$Suite.csproj" }
+  # 'modern' = the SDK-style net10 test projects, which follow the
+  # <Project>.Tests.csproj convention (PGCrypto.Admin.Api.Tests,
+  # PGCrypto.API.Audit.Tests, PGCrypto.Backend.Worker.Tests, ...) and so
+  # match none of the classic *.Tests.<Suite>.csproj suite globs.
+  $pattern = switch ($Suite) {
+    'all'    { '*.Tests.*.csproj' }
+    'modern' { '*.Tests.csproj' }
+    default  { "*.Tests.$Suite.csproj" }
+  }
+  # The E2E/Fixtures exclusion accepts either naming order: the classic suffix form
+  # (Foo.Tests.E2E.csproj) and the SDK-style form the 'modern' glob reaches
+  # (Foo.E2E.Tests.csproj). Matching only the classic order would let an E2E project
+  # through on 'modern' — exactly the suite that must never run on this appliance.
   $projects = Get-ChildItem -Path $RepoDir -Recurse -Filter $pattern -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' -and $_.Name -notmatch '\.Tests\.(E2E|Fixtures)\.' }
+              Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' -and
+                             $_.Name -notmatch '\.(Tests\.(E2E|Fixtures)|(E2E|Fixtures)\.Tests)\.' }
   if (-not $projects) { throw "win-test-run: no test projects matched '$pattern' under $RepoDir" }
 
   # Classic packages.config projects keep their VSTest adapter (e.g. xunit.runner.visualstudio)
@@ -171,7 +184,12 @@ try {
   foreach ($p in $projects) {
     $name = [IO.Path]::GetFileNameWithoutExtension($p.Name)
     Write-Host "win-test-run: dotnet test $name"
-    & dotnet test $p.FullName --no-build --no-restore --nologo @adapterArgs `
+    # Classic suites are prebuilt by the msbuild pass above (--no-build keeps
+    # dotnet test off packages.config restore). The 'modern' SDK-style projects
+    # are not all members of a root .sln (PGCrypto.API.Audit.Tests is
+    # deliberately sln-decoupled), so let dotnet test build them itself.
+    $buildArgs = if ($Suite -eq 'modern') { @() } else { @('--no-build', '--no-restore') }
+    & dotnet test $p.FullName @buildArgs --nologo @adapterArgs `
         --logger "trx;LogFileName=$name.trx" --results-directory $results `
         *>&1 | Tee-Object -FilePath (Join-Path $results "$name.log") -Append
     $rcTest = $LASTEXITCODE

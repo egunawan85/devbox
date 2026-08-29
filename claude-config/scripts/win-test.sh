@@ -14,7 +14,7 @@
 # just queue on a box-side lock). See the spec's Concurrency section.
 #
 # Usage:
-#   win-test.sh [<worktree>] [--suite unit|integration|smoke|all|e2e] [--clean]
+#   win-test.sh [<worktree>] [--suite unit|integration|smoke|all|e2e|modern] [--clean]
 #     <worktree>   path to the checkout to test (default: the current git worktree root)
 #     --suite      which suite to run (default: integration)
 #     --clean      wipe this branch's synced dir on the box first (cold build)
@@ -61,7 +61,7 @@ while [ $# -gt 0 ]; do
     *)  WORKTREE="$1"; shift ;;
   esac
 done
-case "$SUITE" in unit|integration|smoke|all|e2e) ;; *) die "bad --suite: $SUITE" ;; esac
+case "$SUITE" in unit|integration|smoke|all|e2e|modern) ;; *) die "bad --suite: $SUITE" ;; esac
 
 # Default to the current worktree's root (so `cd <worktree>; /win-test` just works).
 if [ -z "$WORKTREE" ]; then
