@@ -90,7 +90,12 @@ Each requirement is observable — you can check whether a given setup satisfies
   xtrace while parsing. Key names must match `^[A-Za-z_][A-Za-z0-9_]*$` and are **rejected,
   not escaped**; values are taken verbatim after the first `=`. A missing, unreadable, or
   pair-less file is a **loud failure** (§X5) rather than a silent unconfigured run — the
-  false-green this exists to prevent. Without the flag the run is unchanged. Distinct from
+  false-green this exists to prevent. So is a non-UTF-8 file: the box decodes with
+  `UTF8.GetString`, which substitutes U+FFFD rather than throwing, so a credential carrying
+  a stray byte would arrive silently altered and fail just as opaquely. Values interpolated
+  into the box-side bootstrap are guarded too — with the flag, a branch name, `CI_DIR`, or
+  runner path bearing a quote, backtick, or unintended `$` is refused, since that bootstrap
+  is the process holding the credentials. Without the flag the run is unchanged. Distinct from
   the repo-committed `<repo>/scripts/win-test.env` the box-side runner loads for
   **non-secret** config; that loader skips keys already set, so forwarded values win.
 - **X4** Each project emits a **TRX + console log** under `<repo>/tmp/win-test/`, fetched
