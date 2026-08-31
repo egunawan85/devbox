@@ -73,9 +73,26 @@ Each requirement is observable — you can check whether a given setup satisfies
   box-side runner (`scripts/win-test-e2e.ps1`): it deploys the IIS stack + SPA on the box
   and runs Playwright against the local origin, using the §R4 SQL Server on
   `localhost:1433`.
-- **X3** Runs are **credential-free**: no vault materialization in the hot path (the
-  in-scope suites are hermetic — LocalDB integrated auth, in-process `TestServer`, mocked
-  externals, in-test secret injection).
+- **X3** Runs are **credential-free by default**: no vault materialization in the hot path
+  (the hermetic suites need none — LocalDB integrated auth, in-process `TestServer`, mocked
+  externals, in-test secret injection). Suites that genuinely configure themselves from the
+  **process environment** opt in with **`--env-file <path>`**, which forwards that file's
+  `KEY=VALUE` pairs into the suite process. `PGCrypto.Tests.Smoke` is the motivating case:
+  it reads its url/key/secret via `Environment.GetEnvironmentVariable` and ships no dotenv
+  loader, so with nothing forwarded its Tier 0 gate fails and nothing is actually verified —
+  and its secrets cannot ride along in the worktree, since they live in gitignored symlinks
+  that §S1's `rsync -az` copies as links that dangle on Windows. The channel is deliberately
+  narrow: values travel **base64 over the SSH channel's stdin** into a box-side bootstrap
+  that sets them as environment variables and then invokes the normal runner as a child, so
+  they appear in **no argv** (the box's process list is readable), **never reach the box's
+  disk** (no scp, no temp file — in memory for the run only), and are **never logged** — the
+  orchestrator echoes the file path and a count, never a key and never a value, and disables
+  xtrace while parsing. Key names must match `^[A-Za-z_][A-Za-z0-9_]*$` and are **rejected,
+  not escaped**; values are taken verbatim after the first `=`. A missing, unreadable, or
+  pair-less file is a **loud failure** (§X5) rather than a silent unconfigured run — the
+  false-green this exists to prevent. Without the flag the run is unchanged. Distinct from
+  the repo-committed `<repo>/scripts/win-test.env` the box-side runner loads for
+  **non-secret** config; that loader skips keys already set, so forwarded values win.
 - **X4** Each project emits a **TRX + console log** under `<repo>/tmp/win-test/`, fetched
   back to the operator's `./tmp/win-test/`.
 - **X5** The runner's **exit code mirrors the suite** (0 iff every project passed). A run

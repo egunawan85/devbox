@@ -15,9 +15,17 @@
 #
 # Usage:
 #   win-test.sh [<worktree>] [--suite unit|integration|smoke|all|e2e|modern] [--clean]
+#               [--env-file <path>]
 #     <worktree>   path to the checkout to test (default: the current git worktree root)
 #     --suite      which suite to run (default: integration)
 #     --clean      wipe this branch's synced dir on the box first (cold build)
+#     --env-file   forward the KEY=VALUE pairs in <path> to the suite as environment
+#                  variables. For credentials a suite reads from its environment and
+#                  that must not be committed or synced — the smoke suite's API keys
+#                  live in gitignored symlinks that rsync would ship as dangling links.
+#                  Values ride the ssh channel's stdin: never in an argv, never on the
+#                  box's disk, never logged — only this path is ever echoed. Omitted,
+#                  nothing is forwarded and the run is byte-for-byte unchanged.
 #
 # Env tunables:
 #   WIN_TEST_TIMEOUT        overall run timeout, seconds (default 3600). On exceed the
@@ -51,17 +59,87 @@ done
 # matching rsync from its toolchain install (spec §R). scp would re-copy everything.
 
 # --- args -----------------------------------------------------------------------
-WORKTREE=""; SUITE="integration"; CLEAN=0
+WORKTREE=""; SUITE="integration"; CLEAN=0; ENV_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --suite) SUITE="${2:?--suite needs a value}"; shift 2 ;;
     --clean) CLEAN=1; shift ;;
-    -h|--help) sed -n '1,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --env-file) ENV_FILE="${2:?--env-file needs a value}"; shift 2 ;;
+    -h|--help) sed -n '1,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown flag: $1" ;;
     *)  WORKTREE="$1"; shift ;;
   esac
 done
 case "$SUITE" in unit|integration|smoke|all|e2e|modern) ;; *) die "bad --suite: $SUITE" ;; esac
+
+# --- credential forwarding (--env-file) -----------------------------------------
+# Some suites configure themselves from the PROCESS ENVIRONMENT only — PGCrypto.Tests.Smoke
+# reads its API url/key/secret via Environment.GetEnvironmentVariable and ships no dotenv
+# loader — so with nothing forwarded its Tier 0 gate fails and nothing is actually verified.
+# Those secrets can't ride along in the worktree either: they live in gitignored symlinks
+# into /dev/shm, and `rsync -az` (no --copy-links) syncs the LINK, which dangles on Windows.
+#
+# So they travel out-of-band, over the ssh channel's stdin, base64-encoded. The box-side
+# wrapper (built at the invocation below) decodes them into real env vars and then runs the
+# normal runner, which inherits them as any child process does. Constraints this satisfies:
+#   * never in an argv — the box's process list is readable, so `$env:K='v'` in an ssh
+#     command string is out;
+#   * never on the box's disk — no scp, no temp file, in memory for the run only;
+#   * never in output — echoes name the file PATH, never a key or a value, and the parser
+#     below disables xtrace so even `bash -x win-test.sh` can't trace one;
+#   * no escaping logic to get subtly wrong — key names are validated against a strict
+#     charset rather than escaped, and base64 flattens every quoting/newline/encoding
+#     hazard in the values.
+# Distinct from the box-side runner's <repo>/scripts/win-test.env loader, which is for
+# non-secret config a repo COMMITS. That one only sets a key it doesn't already see, so
+# values forwarded here (set before the runner starts) deliberately win over it.
+ENV_B64=""; ENV_COUNT=0
+build_env_payload() {
+  local -                       # scope shell options to this function…
+  set +x                        # …so xtrace can never expose a value
+  local f="$1" line key val payload="" n=0 count=0
+  # Fail loud on every unusable-file case: a silent no-op here would recreate exactly the
+  # false-green (suite runs unconfigured, gate fails, or worse, passes vacuously) this exists
+  # to fix. Symlinks are followed — the real files usually ARE symlinks into /dev/shm.
+  [ -e "$f" ] || die "--env-file: no such file: $f"
+  [ -f "$f" ] || die "--env-file: not a regular file: $f"
+  [ -r "$f" ] || die "--env-file: not readable: $f"
+  # `|| [ -n "$line" ]` so a last line with no trailing newline is still parsed, not dropped.
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line="${line%$'\r'}"                        # tolerate a CRLF-terminated file
+    line="${line#$'\xef\xbb\xbf'}"              # …and a UTF-8 BOM from a Windows editor
+    line="${line#"${line%%[![:space:]]*}"}"     # tolerate leading indentation
+    case "$line" in ''|'#'*) continue ;; esac   # blank lines and comments
+    case "$line" in *=*) ;; *) die "--env-file: $f line $n: no '=' found" ;; esac
+    key="${line%%=*}"
+    key="${key%"${key##*[![:space:]]}"}"        # trailing space before the '='
+    val="${line#*=}"                            # split on the FIRST '=' only; '=' inside a
+                                                # value is part of the value
+    # Reject rather than escape. Note the message names the LINE, never the key: on a
+    # malformed file the text left of an '=' can itself be secret material.
+    [[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+      || die "--env-file: $f line $n: invalid key name (must match ^[A-Za-z_][A-Za-z0-9_]*\$)"
+    # Value taken verbatim: whatever follows the first '=' IS the value, spaces and quote
+    # marks included. Credentials are copied from vaults and portals; silently trimming or
+    # unquoting them would turn a correct secret into a baffling auth failure.
+    payload+="$key=$val"$'\n'
+    count=$((count + 1))
+  done < "$f"
+  [ "$count" -gt 0 ] || die "--env-file: $f defines no KEY=VALUE pairs"
+  ENV_COUNT=$count
+  # printf is a bash BUILTIN, so the payload never becomes a process argv anywhere.
+  ENV_B64=$(printf '%s' "$payload" | base64 -w0) || die "--env-file: failed to encode $f"
+}
+# Writes the payload to the ssh channel's stdin. A function (not an inline `printf "$B64"`)
+# so job-control/xtrace output can only ever name the function, never expand the payload.
+emit_env_payload() { printf '%s' "$ENV_B64"; }
+if [ -n "$ENV_FILE" ]; then
+  for bin in base64 iconv; do
+    command -v "$bin" >/dev/null 2>&1 || die "'$bin' not found on PATH (needed by --env-file)"
+  done
+  build_env_payload "$ENV_FILE"    # before the box is woken: a bad file must not start a VM
+fi
 
 # Default to the current worktree's root (so `cd <worktree>; /win-test` just works).
 if [ -z "$WORKTREE" ]; then
@@ -81,6 +159,23 @@ SAFE_BRANCH=$(printf '%s' "$BRANCH" | tr '/\\ ' '---')
 : "${SSH_HOST:?runner.env missing SSH_HOST}"
 : "${SSH_PORT:=2222}"; : "${SSH_USER:=eddyg}"; : "${CI_DIR:=C:/ci}"
 [ -n "${SUBSCRIPTION_ID:-}" ] && az account set --subscription "$SUBSCRIPTION_ID"
+
+# With --env-file the run command becomes a box-side bootstrap that holds the forwarded
+# credentials in its process, so anything interpolated into it must not be able to break out
+# of a PowerShell string and read them back. SUITE is allowlisted and RUN_ID is generated;
+# the branch name and CI_DIR are the only free-form values that reach it, so reject the
+# characters PowerShell would treat specially rather than trying to quote them.
+#
+# The same interpolation exists on the plain path (`-RepoDir '$DEST'`) and predates this
+# flag; the guard is deliberately scoped to --env-file so a run without it stays byte-for-
+# byte what it was. A branch named like this already produces a malformed remote command
+# today — it just has no secrets to lose.
+if [ -n "$ENV_FILE" ]; then
+  case "$SAFE_BRANCH$CI_DIR" in
+    *"'"*|*'"'*|*'$'*|*'`'*|*'\'*)
+      die "--env-file refused: branch '$BRANCH' or CI_DIR '$CI_DIR' contains a quote, backslash, \$ or backtick — rename the branch before forwarding credentials" ;;
+  esac
+fi
 
 SSH=(ssh -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "$SSH_USER@$SSH_HOST")
 
@@ -170,7 +265,48 @@ if (\$log) { \$log.FullName; Get-Content \$log.FullName -Tail 40 -ErrorAction Si
   || die "couldn't clear the stale completion sentinel on the box"
 
 echo "win-test: running '$SUITE' suite on $VM_NAME (run $RUN_ID; timeout ${TIMEOUT_S}s)…"
-"${SSH[@]}" "pwsh -NoProfile -File $REMOTE_RUNNER -RepoDir '$DEST' -Suite '$SUITE' -RunId '$RUN_ID'" </dev/null &
+if [ -n "$ENV_FILE" ]; then
+  # Forwarding credentials: wrap the SAME runner invocation in a box-side bootstrap that
+  # first drains stdin for the payload. The bootstrap carries the paths/suite/run id but
+  # NO values, so encoding it into the command line is safe.
+  #
+  # -EncodedCommand (base64 UTF-16LE) rather than a quoted command string: this text has to
+  # survive the box's default SSH shell, which is PowerShell, and the usual "single-quoted
+  # PS strings only" rule can't express a nested regex + nested quotes without escaping that
+  # is easy to get subtly wrong. Base64 is [A-Za-z0-9+/=] — nothing for either shell to
+  # interpret, so the bootstrap reaches pwsh exactly as written.
+  echo "win-test: forwarding $ENV_COUNT variable(s) from $ENV_FILE (names and values never logged)"
+  ENV_BOOTSTRAP_PS=$(cat <<'PSEOF'
+$ErrorActionPreference = 'Stop'
+$b = [Console]::In.ReadToEnd()
+if (-not $b) { [Console]::Error.WriteLine('win-test-run: credential payload never arrived on stdin'); exit 78 }
+foreach ($l in [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($b -replace '\s',''))).Split([char]10)) {
+  $i = $l.IndexOf('=')
+  if ($i -lt 1) { continue }
+  $k = $l.Substring(0, $i)
+  if ($k -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
+  Set-Item -Path ('Env:' + $k) -Value $l.Substring($i + 1)
+}
+Remove-Variable b, l, i, k -ErrorAction SilentlyContinue
+PSEOF
+)
+  # The runner runs as a CHILD process and inherits the environment set above — the same
+  # `pwsh -NoProfile -File …` invocation as the plain path, so exit codes, the done.json
+  # sentinel and the console stream all behave identically. $REMOTE_RUNNER goes in a PS
+  # double-quoted string because its default spelling contains a literal $HOME for the box
+  # to expand; \$LASTEXITCODE is escaped so bash leaves it for pwsh.
+  ENV_BOOTSTRAP_PS="$ENV_BOOTSTRAP_PS
+& pwsh -NoProfile -File \"$REMOTE_RUNNER\" -RepoDir '$DEST' -Suite '$SUITE' -RunId '$RUN_ID'
+exit \$LASTEXITCODE"
+  ENC_CMD=$(printf '%s' "$ENV_BOOTSTRAP_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0) \
+    || die "couldn't encode the box-side credential bootstrap"
+  # Process substitution, not a pipeline, so $! stays the SSH pid exactly as below. stdin is
+  # the payload instead of /dev/null; it EOFs as soon as the payload is written, so the
+  # background-ssh + inherited-stdio + sentinel contract above is unchanged.
+  "${SSH[@]}" "pwsh -NoProfile -EncodedCommand $ENC_CMD" < <(emit_env_payload) &
+else
+  "${SSH[@]}" "pwsh -NoProfile -File $REMOTE_RUNNER -RepoDir '$DEST' -Suite '$SUITE' -RunId '$RUN_ID'" </dev/null &
+fi
 SSH_PID=$!
 
 # timeout-wrapped: the watchdog's own probes must not be hangable (a wedged-but-open
