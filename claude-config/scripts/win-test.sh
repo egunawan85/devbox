@@ -166,7 +166,9 @@ build_env_payload() {
 # which is one `base64 -d` away from every plaintext credential.
 emit_env_payload() { local -; set +x; printf '%s' "$ENV_B64"; }
 if [ -n "$ENV_FILE" ]; then
-  for bin in base64 iconv; do
+  # Checked here, not in the global dep loop, so a run without the flag is unaffected — and
+  # up front, so a missing tool can't surface later as a misleading integrity error.
+  for bin in base64 iconv tr cmp; do
     command -v "$bin" >/dev/null 2>&1 || die "'$bin' not found on PATH (needed by --env-file)"
   done
   build_env_payload "$ENV_FILE"    # before the box is woken: a bad file must not start a VM
