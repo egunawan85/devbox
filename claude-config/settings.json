@@ -83,6 +83,7 @@
     ],
     "defaultMode": "acceptEdits"
   },
+  "model": "claude-fable-5-1[1m]",
   "hooks": {
     "PreToolUse": [
       {
@@ -101,6 +102,5 @@
   },
   "autoUpdatesChannel": "latest",
   "theme": "dark",
-  "agentPushNotifEnabled": true,
-  "model": "claude-fable-5[1m]"
+  "agentPushNotifEnabled": true
 }
