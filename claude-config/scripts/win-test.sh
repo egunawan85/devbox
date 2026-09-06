@@ -14,10 +14,15 @@
 # just queue on a box-side lock). See the spec's Concurrency section.
 #
 # Usage:
-#   win-test.sh [<worktree>] [--suite unit|integration|smoke|all|e2e|modern] [--clean]
+#   win-test.sh [<worktree>] [--suite unit|integration|smoke|all|e2e|modern|full] [--clean]
 #               [--env-file <path>]
 #     <worktree>   path to the checkout to test (default: the current git worktree root)
-#     --suite      which suite to run (default: integration)
+#     --suite      which suite to run (default: integration). 'full' runs the classic set
+#                  ('all') and then the modern set ('modern') back-to-back on ONE boot,
+#                  syncing once up front and fetching once at the end — a slice pays the
+#                  cold start once instead of twice. Its exit code is the worst of the
+#                  two; a suite failure does not stop the other from running, but a
+#                  timeout does (a wedged box has nothing useful left to tell us).
 #     --clean      wipe this branch's synced dir on the box first (cold build)
 #     --env-file   forward the KEY=VALUE pairs in <path> to the suite as environment
 #                  variables. For credentials a suite reads from its environment and
@@ -33,9 +38,11 @@
 #                  is forwarded and the run is byte-for-byte unchanged.
 #
 # Env tunables:
-#   WIN_TEST_TIMEOUT        overall run timeout, seconds (default 3600). On exceed the
-#                           watchdog collects diagnostics, fetches any partial results,
-#                           and exits 124 — it never hangs indefinitely.
+#   WIN_TEST_TIMEOUT        run timeout, seconds (default 3600), applied PER SUITE — so
+#                           --suite full allows this long for the classic set and again
+#                           for the modern set. On exceed the watchdog collects
+#                           diagnostics, fetches any partial results, and exits 124 — it
+#                           never hangs indefinitely.
 #   WIN_TEST_POLL           seconds between status polls / heartbeat lines (default 30)
 #   WIN_TEST_RUNNER_ENV     alternate runner.env path
 #   WIN_TEST_REMOTE_RUNNER  alternate box-side runner script (testing hook)
@@ -70,12 +77,19 @@ while [ $# -gt 0 ]; do
     --suite) SUITE="${2:?--suite needs a value}"; shift 2 ;;
     --clean) CLEAN=1; shift ;;
     --env-file) ENV_FILE="${2:?--env-file needs a value}"; shift 2 ;;
-    -h|--help) sed -n '1,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '1,54p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown flag: $1" ;;
     *)  WORKTREE="$1"; shift ;;
   esac
 done
-case "$SUITE" in unit|integration|smoke|all|e2e|modern) ;; *) die "bad --suite: $SUITE" ;; esac
+case "$SUITE" in unit|integration|smoke|all|e2e|modern|full) ;; *) die "bad --suite: $SUITE" ;; esac
+
+# 'full' is not a box-side suite — it's "the classic set and the modern set, on ONE boot".
+# The box deallocates between runs, so running them as two invocations makes a slice pay
+# the (multi-minute) cold start twice. Expanding here rather than in the box-side runner
+# keeps this orchestrator-side: it works against any box whose runner already knows 'all'
+# and 'modern', with no matching box-file change to keep in step.
+if [ "$SUITE" = full ]; then SUITE_LIST="all modern"; else SUITE_LIST="$SUITE"; fi
 
 # --- credential forwarding (--env-file) -----------------------------------------
 # Some suites configure themselves from the PROCESS ENVIRONMENT only — PGCrypto.Tests.Smoke
@@ -231,6 +245,52 @@ for _ in $(seq 1 60); do
 done
 [ "${ready:-0}" = 1 ] || die "ssh never came up (box started but unreachable)"
 
+# --- 2b. wait for the box's RSYNC to be ready (not just sshd) -------------------
+# sshd answers well before the box can actually serve an rsync. On a cold boot the
+# first worktree sync then dies mid-stream:
+#   rsync: [Receiver] safe_write failed to write 24 bytes to socket: Resource
+#          temporarily unavailable (11)
+#   rsync error: error in rsync protocol data stream (code 12)
+# — and the run gives up having tested nothing. "ssh answered" and "the box can
+# receive a file" are two different readiness signals; this probes the second one
+# directly by pushing one throwaway byte and requiring it to land.
+#
+# The probe writes to its own dir under $CI_DIR, never into $DEST: it must not race
+# the --delete sync below, and it must be able to run before $DEST exists.
+#
+# The box's rsync (cwRsync) is cygwin: it reads "C:/ci/…" as a RELATIVE path (prefixing
+# $HOME), so rsync gets the /cygdrive/c/… spelling while PowerShell keeps the C:/… one.
+win2cyg() {
+  case "$1" in
+    [A-Za-z]:*) printf '/cygdrive/%s%s' "$(printf '%.1s' "$1" | tr '[:upper:]' '[:lower:]')" "${1#?:}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+CI_CYG=$(win2cyg "$CI_DIR")
+# rsync creates only the LAST component of a destination path, so on a box where $CI_DIR
+# itself does not exist yet the probe below would fail every attempt and then blame the
+# box's copy path for what is really a missing directory. Create it first (Force also
+# makes parents, and is a no-op when it already exists) so a probe failure means what the
+# error says it means.
+"${SSH[@]}" "pwsh -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$CI_DIR' | Out-Null\"" </dev/null \
+  || die "couldn't create $CI_DIR on the box"
+probe_rsync() {
+  local d; d=$(mktemp -d) || return 1
+  : > "$d/.probe"
+  rsync -a -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10" \
+    "$d/.probe" "$SSH_USER@$SSH_HOST:$CI_CYG/.win-test-probe/" >/dev/null 2>&1
+  local rc=$?
+  rm -rf "$d"
+  return $rc
+}
+echo "win-test: waiting for the box's rsync to accept a transfer…"
+for _ in $(seq 1 12); do
+  if probe_rsync; then rsync_ready=1; break; fi
+  sleep 5
+done
+[ "${rsync_ready:-0}" = 1 ] \
+  || die "the box answers ssh but could not accept an rsync transfer after 60s — box started but its copy path never came up"
+
 # --- 3. sync the worktree (warm, incremental) -----------------------------------
 DEST="$CI_DIR/$SAFE_BRANCH"
 # A suite may ship its own box-side runner in the repo (scripts/win-test-<suite>.ps1).
@@ -241,14 +301,6 @@ DEST="$CI_DIR/$SAFE_BRANCH"
 if [ -z "${WIN_TEST_REMOTE_RUNNER:-}" ] && [ "$SUITE" = "e2e" ]; then
   REMOTE_RUNNER="$DEST/scripts/win-test-e2e.ps1"
 fi
-# The box's rsync (cwRsync) is cygwin: it reads "C:/ci/…" as a RELATIVE path (prefixing
-# $HOME), so rsync gets the /cygdrive/c/… spelling while PowerShell keeps the C:/… one.
-win2cyg() {
-  case "$1" in
-    [A-Za-z]:*) printf '/cygdrive/%s%s' "$(printf '%.1s' "$1" | tr '[:upper:]' '[:lower:]')" "${1#?:}" ;;
-    *) printf '%s' "$1" ;;
-  esac
-}
 DEST_CYG=$(win2cyg "$DEST")
 if [ "$CLEAN" = 1 ]; then
   echo "win-test: --clean → wiping $DEST on the box"
@@ -259,10 +311,30 @@ echo "win-test: syncing $WORKTREE → $DEST"
 # above it) exists before the first sync into it.
 "${SSH[@]}" "pwsh -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$DEST' | Out-Null\""
 # Exclude build output and VCS noise so the delta is small; the box rebuilds bin/obj.
-rsync -az --delete \
-  --exclude '.git/' --exclude 'bin/' --exclude 'obj/' --exclude 'tmp/' --exclude 'node_modules/' \
-  -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
-  "$WORKTREE/" "$SSH_USER@$SSH_HOST:$DEST_CYG/"
+#
+# Retried, but ONLY on rsync exit 12 (error in rsync protocol data stream) — the
+# cold-boot transient the probe above narrows but cannot fully exclude: the box can
+# accept a one-byte probe and still drop the first real multi-minute transfer while
+# its services finish settling. Every other exit code is a real failure (bad path,
+# permissions, disk full) and must stay loud and immediate: retrying those would
+# turn a genuine error into three identical errors and a longer wait.
+sync_attempt=0
+while :; do
+  sync_attempt=$((sync_attempt + 1))
+  set +e
+  rsync -az --delete \
+    --exclude '.git/' --exclude 'bin/' --exclude 'obj/' --exclude 'tmp/' --exclude 'node_modules/' \
+    -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
+    "$WORKTREE/" "$SSH_USER@$SSH_HOST:$DEST_CYG/"
+  sync_rc=$?
+  set -e
+  [ "$sync_rc" = 0 ] && break
+  if [ "$sync_rc" != 12 ] || [ "$sync_attempt" -ge 3 ]; then
+    die "syncing the worktree to the box failed (rsync exit $sync_rc after $sync_attempt attempt(s))"
+  fi
+  echo "win-test: ⚠️  sync hit the cold-boot rsync transient (exit 12); retrying (attempt $((sync_attempt + 1))/3)…" >&2
+  sleep $((sync_attempt * 5))
+done
 
 # --- 4. run the suite on the box (box-side lock serializes concurrent runs) ------
 # The remote runner runs as a BACKGROUND ssh (stdio inherited, so its console output
@@ -294,35 +366,50 @@ Get-Process -Name sqlservr,testhost*,dotnet,MSBuild,pwsh,nuget,vstest* -ErrorAct
 '--- newest log tail ---'; \$log = Get-ChildItem '$REMOTE_RESULTS' -Filter *.log -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1; \
 if (\$log) { \$log.FullName; Get-Content \$log.FullName -Tail 40 -ErrorAction SilentlyContinue } else { '(no log yet)' }"
 
-# A stale sentinel from a previous run must not read as this run finishing. (Guarded by
-# Test-Path: Remove-Item on a missing file flips \$? even with SilentlyContinue, which
-# would exit the remote shell — and this script — non-zero.)
-"${SSH[@]}" "if (Test-Path ('$REMOTE_RESULTS'+'/done.json')) { Remove-Item ('$REMOTE_RESULTS'+'/done.json') -Force }" </dev/null \
-  || die "couldn't clear the stale completion sentinel on the box"
+# Runs ONE suite on the already-woken, already-synced box and waits for its sentinel.
+# Factored out so --suite full can call it twice against the same live box: everything
+# expensive (wake, ssh wait, rsync readiness, the worktree sync) happens once before the
+# first call, and the fetch + verdict once after the last. Reads $1 as the suite to run;
+# sets run_rc, and accumulates any_timed_out / lingered / SUMMARY_LINES for the caller.
+# (`git diff -w` shows the body itself is unchanged apart from the noted additions.)
+run_one_suite() {
+  local SUITE_RUN="$1"
+  # Distinct per suite: two runs in one invocation must not be able to match each
+  # other's sentinel. $$ alone repeats within a single process.
+  local RUN_ID="$(date +%s).$$.$SUITE_RUN"
+  local sentinel="" timed_out=0 status rc slept elapsed START SSH_PID ssh_rc err sum
 
-echo "win-test: running '$SUITE' suite on $VM_NAME (run $RUN_ID; timeout ${TIMEOUT_S}s)…"
-if [ -n "$ENV_FILE" ]; then
-  # Forwarding credentials: wrap the SAME runner invocation in a box-side bootstrap that
-  # first drains stdin for the payload. The bootstrap carries the paths/suite/run id but
-  # NO values, so encoding it into the command line is safe.
-  #
-  # -EncodedCommand (base64 UTF-16LE) rather than a quoted command string: this text has to
-  # survive the box's default SSH shell, which is PowerShell, and the usual "single-quoted
-  # PS strings only" rule can't express a nested regex + nested quotes without escaping that
-  # is easy to get subtly wrong. Base64 is [A-Za-z0-9+/=] — nothing for either shell to
-  # interpret, so the bootstrap reaches pwsh exactly as written.
-  echo "win-test: forwarding $ENV_COUNT variable(s) from $ENV_FILE (names and values never logged)"
-  # $REMOTE_RUNNER is interpolated into a DOUBLE-quoted PS string below, deliberately, so the
-  # box expands the literal $HOME its default spelling carries. That makes ", ` and $ live
-  # inside it: a runner path carrying any of them could close the string and run PowerShell
-  # in this very process, moments after the credentials were set into its environment. Strip
-  # the one $HOME that is meant, then refuse any other expansion. Checked here rather than
-  # with the branch/CI_DIR guard above because the e2e reroute rewrites it in between.
-  case "${REMOTE_RUNNER#\$HOME}" in
-    *'"'*|*'`'*|*'$'*)
-      die "--env-file refused: the box-side runner path contains a quote, backtick, or a \$ expansion beyond a leading \$HOME" ;;
-  esac
-  ENV_BOOTSTRAP_PS=$(cat <<'PSEOF'
+  # A stale sentinel from a previous run must not read as this run finishing. (Guarded by
+  # Test-Path: Remove-Item on a missing file flips \$? even with SilentlyContinue, which
+  # would exit the remote shell — and this script — non-zero.)
+  "${SSH[@]}" "if (Test-Path ('$REMOTE_RESULTS'+'/done.json')) { Remove-Item ('$REMOTE_RESULTS'+'/done.json') -Force }" </dev/null \
+    || die "couldn't clear the stale completion sentinel on the box"
+
+  echo "win-test: running '$SUITE_RUN' suite on $VM_NAME (run $RUN_ID; timeout ${TIMEOUT_S}s)…"
+  if [ -n "$ENV_FILE" ]; then
+    # Forwarding credentials: wrap the SAME runner invocation in a box-side bootstrap that
+    # first drains stdin for the payload. The bootstrap carries the paths/suite/run id but
+    # NO values, so encoding it into the command line is safe.
+    #
+    # -EncodedCommand (base64 UTF-16LE) rather than a quoted command string: this text has to
+    # survive the box's default SSH shell, which is PowerShell, and the usual "single-quoted
+    # PS strings only" rule can't express a nested regex + nested quotes without escaping that
+    # is easy to get subtly wrong. Base64 is [A-Za-z0-9+/=] — nothing for either shell to
+    # interpret, so the bootstrap reaches pwsh exactly as written.
+    echo "win-test: forwarding $ENV_COUNT variable(s) from $ENV_FILE (names and values never logged)"
+    # $REMOTE_RUNNER is interpolated into a DOUBLE-quoted PS string below, deliberately, so the
+    # box expands the literal $HOME its default spelling carries. That makes ", ` and $ live
+    # inside it: a runner path carrying any of them could close the string and run PowerShell
+    # in this very process, moments after the credentials were set into its environment. Strip
+    # the one $HOME that is meant, then refuse any other expansion. Checked here rather than
+    # with the branch/CI_DIR guard above because the e2e reroute rewrites it in between.
+    case "${REMOTE_RUNNER#\$HOME}" in
+      *'"'*|*'`'*|*'$'*)
+        die "--env-file refused: the box-side runner path contains a quote, backtick, or a \$ expansion beyond a leading \$HOME" ;;
+    esac
+    # The heredoc body and its PSEOF terminator stay at column 0: <<'PSEOF' is quoted (so the
+    # PowerShell text is taken verbatim) and an indented terminator would not close it.
+    ENV_BOOTSTRAP_PS=$(cat <<'PSEOF'
 $ErrorActionPreference = 'Stop'
 $b = [Console]::In.ReadToEnd()
 if (-not $b) { [Console]::Error.WriteLine('win-test-run: credential payload never arrived on stdin'); exit 78 }
@@ -344,101 +431,131 @@ if ($expected -lt 0 -or $applied -ne $expected) {
 Remove-Variable b, l, i, k, expected, applied -ErrorAction SilentlyContinue
 PSEOF
 )
-  # The runner runs as a CHILD process and inherits the environment set above — the same
-  # `pwsh -NoProfile -File …` invocation as the plain path, so exit codes, the done.json
-  # sentinel and the console stream all behave identically. $REMOTE_RUNNER goes in a PS
-  # double-quoted string because its default spelling contains a literal $HOME for the box
-  # to expand; \$LASTEXITCODE is escaped so bash leaves it for pwsh.
-  ENV_BOOTSTRAP_PS="$ENV_BOOTSTRAP_PS
-& pwsh -NoProfile -File \"$REMOTE_RUNNER\" -RepoDir '$DEST' -Suite '$SUITE' -RunId '$RUN_ID'
+    # The runner runs as a CHILD process and inherits the environment set above — the same
+    # `pwsh -NoProfile -File …` invocation as the plain path, so exit codes, the done.json
+    # sentinel and the console stream all behave identically. $REMOTE_RUNNER goes in a PS
+    # double-quoted string because its default spelling contains a literal $HOME for the box
+    # to expand; \$LASTEXITCODE is escaped so bash leaves it for pwsh.
+    ENV_BOOTSTRAP_PS="$ENV_BOOTSTRAP_PS
+& pwsh -NoProfile -File \"$REMOTE_RUNNER\" -RepoDir '$DEST' -Suite '$SUITE_RUN' -RunId '$RUN_ID'
 exit \$LASTEXITCODE"
-  ENC_CMD=$(printf '%s' "$ENV_BOOTSTRAP_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0) \
-    || die "couldn't encode the box-side credential bootstrap"
-  # Process substitution, not a pipeline, so $! stays the SSH pid exactly as below. stdin is
-  # the payload instead of /dev/null; it EOFs as soon as the payload is written, so the
-  # background-ssh + inherited-stdio + sentinel contract above is unchanged.
-  "${SSH[@]}" "pwsh -NoProfile -EncodedCommand $ENC_CMD" < <(emit_env_payload) &
-else
-  "${SSH[@]}" "pwsh -NoProfile -File $REMOTE_RUNNER -RepoDir '$DEST' -Suite '$SUITE' -RunId '$RUN_ID'" </dev/null &
-fi
-SSH_PID=$!
+    ENC_CMD=$(printf '%s' "$ENV_BOOTSTRAP_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0) \
+      || die "couldn't encode the box-side credential bootstrap"
+    # Process substitution, not a pipeline, so $! stays the SSH pid exactly as below. stdin is
+    # the payload instead of /dev/null; it EOFs as soon as the payload is written, so the
+    # background-ssh + inherited-stdio + sentinel contract above is unchanged.
+    "${SSH[@]}" "pwsh -NoProfile -EncodedCommand $ENC_CMD" < <(emit_env_payload) &
+  else
+    "${SSH[@]}" "pwsh -NoProfile -File $REMOTE_RUNNER -RepoDir '$DEST' -Suite '$SUITE_RUN' -RunId '$RUN_ID'" </dev/null &
+  fi
+  SSH_PID=$!
 
-# timeout-wrapped: the watchdog's own probes must not be hangable (a wedged-but-open
-# TCP session would otherwise block a poll forever, recreating the very hang we watch for).
-poll_status() { timeout 30 "${SSH[@]}" "$STATUS_PS" 2>/dev/null </dev/null || true; }
-# Extracts the exit code if $1 is OUR run's sentinel line; prints nothing otherwise.
-sentinel_rc() {
-  case "$1" in
-    "DONE "*"\"runId\":\"$RUN_ID\""*)
-      printf '%s' "$1" | sed -n 's/.*"rc": *\(-\{0,1\}[0-9][0-9]*\).*/\1/p' ;;
-  esac
-}
+  # timeout-wrapped: the watchdog's own probes must not be hangable (a wedged-but-open
+  # TCP session would otherwise block a poll forever, recreating the very hang we watch for).
+  poll_status() { timeout 30 "${SSH[@]}" "$STATUS_PS" 2>/dev/null </dev/null || true; }
+  # Extracts the exit code if $1 is OUR run's sentinel line; prints nothing otherwise.
+  sentinel_rc() {
+    case "$1" in
+      "DONE "*"\"runId\":\"$RUN_ID\""*)
+        printf '%s' "$1" | sed -n 's/.*"rc": *\(-\{0,1\}[0-9][0-9]*\).*/\1/p' ;;
+    esac
+  }
 
-START=$(date +%s)
-run_rc=""; sentinel=""; timed_out=0
-while :; do
-  # Sleep in short slices so a finished ssh is noticed within ~2 s, not a full poll.
-  slept=0
-  while [ "$slept" -lt "$POLL_S" ] && kill -0 "$SSH_PID" 2>/dev/null; do sleep 2; slept=$((slept + 2)); done
-  elapsed=$(( $(date +%s) - START ))
+  START=$(date +%s)
+  run_rc=""
+  while :; do
+    # Sleep in short slices so a finished ssh is noticed within ~2 s, not a full poll.
+    slept=0
+    while [ "$slept" -lt "$POLL_S" ] && kill -0 "$SSH_PID" 2>/dev/null; do sleep 2; slept=$((slept + 2)); done
+    elapsed=$(( $(date +%s) - START ))
 
-  status=$(poll_status)
-  rc=$(sentinel_rc "$status")
-  if [ -n "$rc" ]; then sentinel="${status#DONE }"; run_rc="$rc"; break; fi
-
-  if ! kill -0 "$SSH_PID" 2>/dev/null; then
-    # ssh is gone with no sentinel yet. Poll once more (the sentinel lands just before
-    # pwsh exits — a lost race here is possible); if still nothing, the run
-    # INFRASTRUCTURE failed (connection died, runner missing) — loud, non-zero.
-    sleep 3
     status=$(poll_status)
     rc=$(sentinel_rc "$status")
     if [ -n "$rc" ]; then sentinel="${status#DONE }"; run_rc="$rc"; break; fi
-    set +e; wait "$SSH_PID"; ssh_rc=$?; set -e
-    echo "win-test: ⚠️  ssh exited (rc=$ssh_rc) but run $RUN_ID left no completion sentinel — infrastructure failure, not a suite verdict." >&2
-    run_rc=$(( ssh_rc == 0 ? 1 : ssh_rc ))
+
+    if ! kill -0 "$SSH_PID" 2>/dev/null; then
+      # ssh is gone with no sentinel yet. Poll once more (the sentinel lands just before
+      # pwsh exits — a lost race here is possible); if still nothing, the run
+      # INFRASTRUCTURE failed (connection died, runner missing) — loud, non-zero.
+      sleep 3
+      status=$(poll_status)
+      rc=$(sentinel_rc "$status")
+      if [ -n "$rc" ]; then sentinel="${status#DONE }"; run_rc="$rc"; break; fi
+      set +e; wait "$SSH_PID"; ssh_rc=$?; set -e
+      echo "win-test: ⚠️  ssh exited (rc=$ssh_rc) but run $RUN_ID left no completion sentinel — infrastructure failure, not a suite verdict." >&2
+      run_rc=$(( ssh_rc == 0 ? 1 : ssh_rc ))
+      break
+    fi
+
+    if [ "$elapsed" -ge "$TIMEOUT_S" ]; then timed_out=1; break; fi
+    echo "win-test: ⏱ ${elapsed}s elapsed [$SUITE_RUN] — ${status:-status poll failed (box busy?)}"
+  done
+
+  if [ "$timed_out" = 1 ]; then
+    # Never hang silently: abort loudly, but grab evidence + partial results first.
+    run_rc=124
+    any_timed_out=1
+    echo "win-test: ⛔ run exceeded WIN_TEST_TIMEOUT=${TIMEOUT_S}s — possible hang. Collecting diagnostics…" >&2
+    state=$(az vm get-instance-view -g "$RESOURCE_GROUP" -n "$VM_NAME" \
+              --query "instanceView.statuses[?starts_with(code,'PowerState')].code | [0]" -o tsv 2>/dev/null || echo unknown)
+    echo "win-test: box power state: ${state:-unknown}" >&2
+    timeout 60 "${SSH[@]}" "$DIAG_PS" </dev/null >&2 || echo "win-test: (remote diagnostics unavailable)" >&2
+  fi
+
+  # Tear down the ssh channel. On the happy path it exits by itself right after the
+  # sentinel; give it a short grace, then kill — a lingering ssh after a finished run is
+  # exactly the hang this watchdog exists for. (Killing the ssh never kills the box-side
+  # runner; the box's lock/heartbeat + idle-monitor own that lifecycle.)
+  if kill -0 "$SSH_PID" 2>/dev/null; then
+    if [ "$timed_out" != 1 ]; then
+      for _ in $(seq 1 10); do kill -0 "$SSH_PID" 2>/dev/null || break; sleep 2; done
+    fi
+    if kill -0 "$SSH_PID" 2>/dev/null; then
+      if [ "$timed_out" = 1 ]; then
+        echo "win-test: aborting the ssh channel."
+      else
+        echo "win-test: ssh channel lingering after run end — killing it (a box-side child was holding stdio)."
+        lingered=1
+      fi
+      kill "$SSH_PID" 2>/dev/null || true; sleep 1; kill -9 "$SSH_PID" 2>/dev/null || true
+    fi
+  fi
+  set +e; wait "$SSH_PID" 2>/dev/null; set -e
+
+  # Surface a runner-side error (lock timeout, build failure throw) recorded in the sentinel,
+  # and the runner's machine-readable summary line. The summary is what a session should read
+  # instead of scraping every project's Passed!/Failed! line out of the log.
+  if [ -n "$sentinel" ]; then
+    err=$(printf '%s' "$sentinel" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')
+    [ -n "$err" ] && echo "win-test: runner reported: $err" >&2
+    sum=$(printf '%s' "$sentinel" | sed -n 's/.*"summary":"\([^"]*\)".*/\1/p')
+    if [ -n "$sum" ]; then
+      echo "win-test: $sum"
+      SUMMARY_LINES="$SUMMARY_LINES$sum"$'\n'
+    fi
+  fi
+  # Explicit: the verdict travels in $run_rc, never in this function's exit status. Under
+  # `set -e` a non-zero return here would abort the whole script mid-loop — so a failing
+  # first suite would take the second one down with it instead of reporting it.
+  return 0
+}
+
+# --- 4b. drive the suite list (one entry, or 'all' then 'modern' for --suite full) ---
+overall_rc=0; any_timed_out=0; lingered=0; SUMMARY_LINES=""
+for suite_to_run in $SUITE_LIST; do
+  run_one_suite "$suite_to_run"
+  # Worst result wins: a green modern run must never mask a red classic one.
+  if [ "$run_rc" != 0 ] && [ "$overall_rc" = 0 ]; then overall_rc="$run_rc"; fi
+  # A suite FAILING is a verdict — keep going, the other suite's verdict is still worth
+  # having from this boot. A suite TIMING OUT is not a verdict: the box may be wedged, so
+  # stop rather than pile a second doomed run onto it.
+  if [ "$any_timed_out" = 1 ]; then
+    echo "win-test: skipping the remaining suite(s) after a timeout." >&2
     break
   fi
-
-  if [ "$elapsed" -ge "$TIMEOUT_S" ]; then timed_out=1; break; fi
-  echo "win-test: ⏱ ${elapsed}s elapsed — ${status:-status poll failed (box busy?)}"
 done
-
-if [ "$timed_out" = 1 ]; then
-  # Never hang silently: abort loudly, but grab evidence + partial results first.
-  run_rc=124
-  echo "win-test: ⛔ run exceeded WIN_TEST_TIMEOUT=${TIMEOUT_S}s — possible hang. Collecting diagnostics…" >&2
-  state=$(az vm get-instance-view -g "$RESOURCE_GROUP" -n "$VM_NAME" \
-            --query "instanceView.statuses[?starts_with(code,'PowerState')].code | [0]" -o tsv 2>/dev/null || echo unknown)
-  echo "win-test: box power state: ${state:-unknown}" >&2
-  timeout 60 "${SSH[@]}" "$DIAG_PS" </dev/null >&2 || echo "win-test: (remote diagnostics unavailable)" >&2
-fi
-
-# Tear down the ssh channel. On the happy path it exits by itself right after the
-# sentinel; give it a short grace, then kill — a lingering ssh after a finished run is
-# exactly the hang this watchdog exists for. (Killing the ssh never kills the box-side
-# runner; the box's lock/heartbeat + idle-monitor own that lifecycle.)
-if kill -0 "$SSH_PID" 2>/dev/null; then
-  if [ "$timed_out" != 1 ]; then
-    for _ in $(seq 1 10); do kill -0 "$SSH_PID" 2>/dev/null || break; sleep 2; done
-  fi
-  if kill -0 "$SSH_PID" 2>/dev/null; then
-    if [ "$timed_out" = 1 ]; then
-      echo "win-test: aborting the ssh channel."
-    else
-      echo "win-test: ssh channel lingering after run end — killing it (a box-side child was holding stdio)."
-      lingered=1
-    fi
-    kill "$SSH_PID" 2>/dev/null || true; sleep 1; kill -9 "$SSH_PID" 2>/dev/null || true
-  fi
-fi
-set +e; wait "$SSH_PID" 2>/dev/null; set -e
-
-# Surface a runner-side error (lock timeout, build failure throw) recorded in the sentinel.
-if [ -n "$sentinel" ]; then
-  err=$(printf '%s' "$sentinel" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')
-  [ -n "$err" ] && echo "win-test: runner reported: $err" >&2
-fi
+run_rc="$overall_rc"
+timed_out="$any_timed_out"
 
 # --- 5. fetch results (loud — a swallowed fetch error reads as a clean run) ------
 echo "win-test: fetching results → ./tmp/win-test/"
@@ -466,6 +583,14 @@ if [ "$run_rc" = 0 ]; then
     echo "win-test: ❌ suite reported pass but no TRX from this run was fetched — refusing to report green without evidence." >&2
     run_rc=1
   fi
+fi
+
+# The runner's machine-readable summary, one line per suite that ran (--suite full leaves
+# two). This plus the exit code is the verdict; the per-project Passed!/Failed! lines in the
+# fetched logs are supporting detail, not something a session should have to scrape.
+if [ -n "$SUMMARY_LINES" ]; then
+  echo
+  printf '%s' "$SUMMARY_LINES" | sed 's/^/win-test: /'
 fi
 
 echo
