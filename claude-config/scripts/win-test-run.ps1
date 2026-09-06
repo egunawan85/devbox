@@ -25,7 +25,20 @@
 
   Exit code mirrors `dotnet test` (0 = all passed), except that a project which executes
   zero tests fails the run — vstest exits 0 on "no tests found", which would otherwise be
-  a silent pass (spec §X5).
+  a silent pass (spec §X5). Two things are deliberately kept OUT of that verdict, because
+  neither is evidence the code is broken: the Fixtures/Support helper libraries (no test
+  adapter, zero tests by design — excluded from selection), and tests that shell out to
+  git against their own checkout (the sync omits .git, so they cannot run here — excluded
+  by --filter). Both exclusions are printed and counted in the summary line below.
+
+  The run ends with one machine-readable line per project and one for the run:
+
+    WIN-TEST-PROJECT name=<proj> rc=<n> passed=<n> failed=<n> skipped=<n> total=<n>
+    WIN-TEST-SUMMARY suite=<s> projects=<ok>/<total> passed=<n> failed=<n> skipped=<n> \
+                     excluded=<classes|none> rc=<n>
+
+  The summary is also carried in done.json, so the orchestrator can report the verdict
+  without parsing the console log at all.
 
 .PARAMETER RepoDir   The synced worktree on the box, e.g. C:\ci\my-branch.
 .PARAMETER Suite     unit | integration | smoke | all | modern  (default: integration)
@@ -44,6 +57,10 @@ $ErrorActionPreference = 'Stop'
 # (lock timeout, restore/build throw) must still report non-zero in the sentinel.
 $script:rc  = 1
 $script:err = $null
+# The machine-readable verdict line (see the summary block at the end of the run). Stays
+# null on paths that never reach a verdict — a lock timeout or a build throw — so the
+# orchestrator prints nothing rather than a summary of a run that did not happen.
+$script:summary = $null
 
 # Appliance state lives outside any one branch dir so it survives GC and --clean.
 $StateDir  = 'C:\ci\.win-test'
@@ -151,9 +168,14 @@ try {
 
   # Select test projects by naming convention (*.Tests.<Suite>.csproj); 'all' runs every
   # *.Tests.*.csproj EXCEPT E2E (live staging + real secrets — the scheduled GH Action's
-  # job, not this appliance's — spec §X2) and Fixtures (the shared test-data/helpers
-  # library the suites borrow from — not a runnable suite: it carries no test adapter,
-  # so it executes zero tests and would trip the §X5 zero-tests-fails-loud rule).
+  # job, not this appliance's — spec §X2) and the two SUPPORT LIBRARIES the suites borrow
+  # from: Fixtures (shared test data/helpers) and Support. Neither is a runnable suite —
+  # they carry no test adapter, so each executes zero tests and would trip the §X5
+  # zero-tests-fails-loud rule, failing an otherwise green run on a library that is doing
+  # exactly what it was written to do. Excluding them here (rather than special-casing
+  # their result below) keeps §X5 itself absolute: every project we DO run must execute
+  # tests. Support joined this list after a green runegate classic run reported "2
+  # project(s) failed" — one of them PGCrypto.Tests.Support, which has no tests by design.
   # 'modern' = the SDK-style net10 test projects, which follow the
   # <Project>.Tests.csproj convention (PGCrypto.Admin.Api.Tests,
   # PGCrypto.API.Audit.Tests, PGCrypto.Backend.Worker.Tests, ...) and so
@@ -163,13 +185,13 @@ try {
     'modern' { '*.Tests.csproj' }
     default  { "*.Tests.$Suite.csproj" }
   }
-  # The E2E/Fixtures exclusion accepts either naming order: the classic suffix form
+  # The exclusion accepts either naming order: the classic suffix form
   # (Foo.Tests.E2E.csproj) and the SDK-style form the 'modern' glob reaches
   # (Foo.E2E.Tests.csproj). Matching only the classic order would let an E2E project
   # through on 'modern' — exactly the suite that must never run on this appliance.
   $projects = Get-ChildItem -Path $RepoDir -Recurse -Filter $pattern -ErrorAction SilentlyContinue |
               Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' -and
-                             $_.Name -notmatch '\.(Tests\.(E2E|Fixtures)|(E2E|Fixtures)\.Tests)\.' }
+                             $_.Name -notmatch '\.(Tests\.(E2E|Fixtures|Support)|(E2E|Fixtures|Support)\.Tests)\.' }
   if (-not $projects) { throw "win-test-run: no test projects matched '$pattern' under $RepoDir" }
 
   # Classic packages.config projects keep their VSTest adapter (e.g. xunit.runner.visualstudio)
@@ -180,7 +202,39 @@ try {
     Select-Object -ExpandProperty DirectoryName -Unique |
     ForEach-Object { $adapterArgs += @('--test-adapter-path', $_) }
 
+  # --- tests that cannot run on this appliance, by construction --------------------
+  # win-test.sh syncs the worktree with `rsync --exclude '.git/'` — deliberately, since
+  # the history is large and no test needs it. But a repo can carry tests that shell out
+  # to git against their own checkout (runegate's gitignore-anchor regression tests run
+  # `git check-ignore`). On the box those do not fail because the code regressed; they
+  # fail with "fatal: not a git repository" because the thing they inspect was never
+  # shipped here. Counting that as a suite failure poisons an otherwise green run and
+  # trains the reader to discount real red — so exclude them, LOUDLY: the filter is
+  # printed below and the count rides in the machine-readable summary, so a skip is
+  # always visible and never mistaken for a pass.
+  #
+  # This is the narrow case "the sync cannot carry what the test reads". It is NOT a
+  # place to silence a test that genuinely fails on Windows — that is a real verdict and
+  # must stay red. A repo extends the list from its own scripts/win-test.env
+  # (WIN_TEST_EXCLUDE_CLASSES=Foo,Bar), versioned with its tests.
+  $gitDependentClasses = @('Issue1943_GitignoreDataAnchorRegressionTests')
+  if ($env:WIN_TEST_EXCLUDE_CLASSES) {
+    $gitDependentClasses += ($env:WIN_TEST_EXCLUDE_CLASSES -split ',' |
+                             ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  }
+  $gitDependentClasses = @($gitDependentClasses | Select-Object -Unique)
+  $filterArgs = @()
+  if ($gitDependentClasses.Count -gt 0) {
+    # vstest filter grammar: FullyQualifiedName!~X&FullyQualifiedName!~Y (substring, ANDed
+    # so every listed class is excluded). One --filter argument; repeating the flag would
+    # keep only the last.
+    $expr = ($gitDependentClasses | ForEach-Object { "FullyQualifiedName!~$_" }) -join '&'
+    $filterArgs = @('--filter', $expr)
+    Write-Host "win-test-run: excluding $($gitDependentClasses.Count) class(es) that need the .git dir the sync omits: $($gitDependentClasses -join ', ')"
+  }
+
   $failed = 0
+  $projectStats = @()
   foreach ($p in $projects) {
     $name = [IO.Path]::GetFileNameWithoutExtension($p.Name)
     Write-Host "win-test-run: dotnet test $name"
@@ -189,22 +243,58 @@ try {
     # are not all members of a root .sln (PGCrypto.API.Audit.Tests is
     # deliberately sln-decoupled), so let dotnet test build them itself.
     $buildArgs = if ($Suite -eq 'modern') { @() } else { @('--no-build', '--no-restore') }
-    & dotnet test $p.FullName @buildArgs --nologo @adapterArgs `
+    & dotnet test $p.FullName @buildArgs --nologo @adapterArgs @filterArgs `
         --logger "trx;LogFileName=$name.trx" --results-directory $results `
         *>&1 | Tee-Object -FilePath (Join-Path $results "$name.log") -Append
     $rcTest = $LASTEXITCODE
     # A project that discovers/executes zero tests must FAIL the run (spec §X5: a run that
     # could not execute is a loud failure, never a silent pass) — vstest exits 0 for it.
-    $executed = 0
+    $executed = 0; $passed = 0; $failedTests = 0; $total = 0
     $trx = Join-Path $results "$name.trx"
-    if (Test-Path $trx) { $executed = [int]([xml](Get-Content $trx)).TestRun.ResultSummary.Counters.executed }
-    if ($rcTest -ne 0) { $failed++ }
-    elseif ($executed -eq 0) { Write-Host "win-test-run: $name executed ZERO tests — failing loud (spec X5)"; $failed++ }
+    if (Test-Path $trx) {
+        $counters    = ([xml](Get-Content $trx)).TestRun.ResultSummary.Counters
+        $executed    = [int]$counters.executed
+        $passed      = [int]$counters.passed
+        $failedTests = [int]$counters.failed
+        $total       = [int]$counters.total
+    }
+    # 'total' counts what was DISCOVERED, 'executed' what actually ran, so the difference
+    # is everything skipped — [Fact(Skip=...)] and anything the --filter above removed.
+    $skipped = [Math]::Max(0, $total - $executed)
+    $projOk  = $true
+    if ($rcTest -ne 0) { $failed++; $projOk = $false }
+    elseif ($executed -eq 0) { Write-Host "win-test-run: $name executed ZERO tests — failing loud (spec X5)"; $failed++; $projOk = $false }
+    # One machine-readable line per project, so a reader never has to correlate a
+    # Passed!/Failed! console line with the project that produced it.
+    Write-Host ("WIN-TEST-PROJECT name={0} rc={1} passed={2} failed={3} skipped={4} total={5}" -f `
+                $name, $rcTest, $passed, $failedTests, $skipped, $total)
+    $projectStats += [pscustomobject]@{
+        Name = $name; Ok = $projOk; Passed = $passed; Failed = $failedTests
+        Skipped = $skipped; Total = $total
+    }
     Touch-Heartbeat
   }
 
   if ($failed -gt 0) { Write-Host "win-test-run: $failed project(s) failed."; $script:rc = 1 }
   else               { Write-Host "win-test-run: all suites passed.";        $script:rc = 0 }
+
+  # --- the one line a session should read ------------------------------------------
+  # Before this existed the runner printed no final verdict, so every caller scraped each
+  # project's Passed!/Failed! line out of a 200k-line log and re-derived the answer — and
+  # the exit code it was cross-checking against was itself wrong (see the two exclusions
+  # above). One line, fixed key=value shape, also carried in done.json so the orchestrator
+  # can echo it without parsing the log at all.
+  $sumPassed  = ($projectStats | Measure-Object -Property Passed  -Sum).Sum
+  $sumFailed  = ($projectStats | Measure-Object -Property Failed  -Sum).Sum
+  $sumSkipped = ($projectStats | Measure-Object -Property Skipped -Sum).Sum
+  $okCount    = @($projectStats | Where-Object { $_.Ok }).Count
+  $excludedLabel = if ($gitDependentClasses.Count -gt 0) { $gitDependentClasses -join '+' } else { 'none' }
+  # No '"' anywhere in this string: it is embedded in done.json, which the orchestrator
+  # reads with a sed capture bounded by the next quote.
+  $script:summary = ("WIN-TEST-SUMMARY suite={0} projects={1}/{2} passed={3} failed={4} skipped={5} excluded={6} rc={7}" -f `
+      $Suite, $okCount, $projectStats.Count,
+      [int]$sumPassed, [int]$sumFailed, [int]$sumSkipped, $excludedLabel, $script:rc)
+  Write-Host $script:summary
 }
 catch {
   # Record the failure for the sentinel, then rethrow so the console still shows it and
@@ -241,7 +331,8 @@ finally {
   # above already ran. win-test.sh treats this file (matched by runId), not the SSH
   # channel, as "the run finished"; rc here is the authoritative verdict (spec §X6).
   try {
-    @{ runId = $RunId; rc = $script:rc; error = $script:err; finishedAt = (Get-Date -Format o) } |
+    @{ runId = $RunId; rc = $script:rc; error = $script:err; summary = $script:summary
+       finishedAt = (Get-Date -Format o) } |
       ConvertTo-Json -Compress | Set-Content -Path (Join-Path $results 'done.json')
   } catch { Write-Host "win-test-run: couldn't write done.json ($_)" }
 }
