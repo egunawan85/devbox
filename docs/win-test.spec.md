@@ -64,9 +64,18 @@ Each requirement is observable — you can check whether a given setup satisfies
 
 - **X1** Suites are selected by naming convention: `*.Tests.<suite>.csproj` for
   `unit|integration|smoke`; **`all`** runs every `*.Tests.*.csproj` **except E2E**
-  (§X2) **and Fixtures** — `*.Tests.Fixtures` is the shared test-data/helpers library
-  the suites borrow from, not a runnable suite; it executes zero tests and would
-  otherwise trip §X5's fail-loud rule.
+  (§X2) **and the support libraries** — `*.Tests.Fixtures` and `*.Tests.Support` are
+  the shared test-data/helper libraries the suites borrow from, not runnable suites;
+  each executes zero tests and would otherwise trip §X5's fail-loud rule. `modern`
+  selects the SDK-style `<Project>.Tests.csproj` projects, which match none of the
+  classic globs.
+- **X1a** **`full`** is an orchestrator-side suite, not a box-side one: it runs `all`
+  then `modern` back-to-back on **one boot**, syncing once before and fetching once
+  after, so a slice pays the cold start once rather than twice. Its exit code is the
+  worst of the two. A suite **failing** does not stop the other — that verdict is still
+  worth having from this boot — but a **timeout** does, since a wedged box has nothing
+  further to say. Expanded in `win-test.sh` so it works against any box whose runner
+  already knows `all` and `modern`, with no box-side change to keep in step.
 - **X2** The **staging** E2E/Playwright run stays **out of scope** here — it needs a live
   staging env and real secrets, and runs as a scheduled GitHub Action. A **local** E2E run
   is in scope via `--suite e2e`, which routes past the generic runner to the repo's own
@@ -102,7 +111,36 @@ Each requirement is observable — you can check whether a given setup satisfies
   back to the operator's `./tmp/win-test/`.
 - **X5** The runner's **exit code mirrors the suite** (0 iff every project passed). A run
   that could not execute (box unreachable, no config, no matching projects) is a **loud
-  failure**, never a silent pass.
+  failure**, never a silent pass. A project that executes **zero tests** is such a
+  failure — vstest exits 0 on "no tests found".
+- **X5a** Two things are kept **out of that verdict**, because neither is evidence the
+  code is broken, and counting them poisons a green run and trains the reader to
+  discount real red:
+  1. the §X1 support libraries, excluded from **selection** rather than special-cased
+     afterwards — so §X5 itself stays absolute: every project actually run must
+     execute tests;
+  2. tests that shell out to **git against their own checkout**, which cannot work
+     because §S excludes `.git` from the sync (they fail "fatal: not a git
+     repository"). Excluded by `--filter` from a named class list the runner carries,
+     extensible per repo via `scripts/win-test.env` (`WIN_TEST_EXCLUDE_CLASSES`).
+
+  Both exclusions are **loud, never silent**: the applied filter is printed and the
+  class names and counts ride in the §X9 summary, so a skip can never read as a pass.
+  This covers only "the sync cannot carry what the test reads" — a test that genuinely
+  fails on Windows is a real verdict and stays red.
+- **X9** The run ends with a **machine-readable verdict**, so a caller need not scrape
+  per-project `Passed!`/`Failed!` lines out of a 200k-line log:
+
+  ```
+  WIN-TEST-PROJECT name=<proj> rc=<n> passed=<n> failed=<n> skipped=<n> total=<n>
+  WIN-TEST-SUMMARY suite=<s> projects=<ok>/<total> passed=<n> failed=<n> skipped=<n> \
+                   excluded=<classes|none> rc=<n>
+  ```
+
+  The summary is also carried in the §X6 sentinel, so the orchestrator echoes it
+  without reading the console log at all. It stays **absent** on paths that never reach
+  a verdict (lock timeout, build throw) — nothing is reported about a run that did not
+  happen.
 - **X6** Completion is signalled by an **artifact, not the SSH channel**: the box-side
   runner's final act — on pass, fail, or throw — is writing `tmp/win-test/done.json`
   (run id + real exit code). The orchestrator treats that sentinel as the source of truth
@@ -113,9 +151,10 @@ Each requirement is observable — you can check whether a given setup satisfies
 - **X7** The orchestrator **never blocks indefinitely**: while the suite runs it emits a
   periodic heartbeat (elapsed, remote log progress, TRX presence); it short-circuits as
   soon as the sentinel appears (killing a lingering SSH channel); and past
-  `WIN_TEST_TIMEOUT` (default 60 min) it aborts — capturing diagnostics (box power
-  state, remote process list, log tail), fetching partial results — and exits **124**
-  with an explicit "possible hang" message.
+  `WIN_TEST_TIMEOUT` (default 60 min, applied **per suite** — so `full` allows it once
+  for each) it aborts — capturing diagnostics (box power state, remote process list, log
+  tail), fetching partial results — and exits **124** with an explicit "possible hang"
+  message.
 - **X8** Result fetch is **loud**: a failed fetch is reported, and a run that claims pass
   without a TRX from this run fetched locally is reported as a **failure** (green needs
   evidence — X5).
@@ -124,6 +163,15 @@ Each requirement is observable — you can check whether a given setup satisfies
 
 - **I1** The operator/agent entry point is **`/win-test`** on the Linux box, which calls
   `~/.claude/scripts/win-test.sh`. There is intentionally **no** `deploy/devbox test` alias.
+- **I1a** For a run that outlives the caller — an agent session's foreground command is
+  killed after about ten minutes, and a run takes 5–25 — the entry point is
+  **`~/.claude/scripts/win-test-launch.sh`**, which takes the same arguments, detaches
+  the run (`setsid` + `nohup`, stdin closed), logs to the worktree's own `./tmp/`,
+  appends `WRAPPER_EXIT <rc>` when it ends, and prints the log path and PID
+  immediately. It enforces §C1's single-tenant rule caller-side with an **flock** held
+  by the detached run itself for exactly as long as it lives — deliberately not a scan
+  of the process table, which under an agent harness matches any command whose text
+  merely mentions the script, including the check itself.
 - **I2** Box identity + tunables reach the runner via **`~/.config/devbox/win-test/
   runner.env`**, written by `devbox -p win-test up`. Required keys: `RESOURCE_GROUP`,
   `VM_NAME`, `SSH_HOST`, `SSH_PORT`, `SSH_USER`, `SUBSCRIPTION_ID`, `CI_DIR`,
