@@ -76,6 +76,19 @@ Each requirement is observable — you can check whether a given setup satisfies
   worth having from this boot — but a **timeout** does, since a wedged box has nothing
   further to say. Expanded in `win-test.sh` so it works against any box whose runner
   already knows `all` and `modern`, with no box-side change to keep in step.
+- **X1b** The suite glob decides **which** projects run; the project's **shape** decides
+  **how** each is built. A classic packages.config csproj (no `Sdk` on `<Project>`) is
+  prebuilt — `nuget restore` + the VS Build Tools MSBuild — and tested `--no-build` with
+  the repo-local test adapters. An SDK-style csproj (`<Project Sdk=...>`, or the
+  `<Import Sdk>` / `<Sdk Name>` spellings) restores and builds itself under `dotnet test`,
+  **whichever glob its filename matched**, using the MSBuild bundled with the SDK it pins.
+  Only solutions that contain a selected classic project are prebuilt; a solution of
+  SDK-style projects never reaches Build Tools MSBuild, whose version lags the SDK's
+  (17.14 vs the 18.0 that SDK 10.0.400 requires). This is what makes filename
+  conventions safe to keep across a .NET Framework → SDK migration: qrypto-omni's
+  `QryptoOmni.Tests.<suite>.csproj` are net10, matched the classic glob, and under
+  name-based routing every one failed SDK resolution before a test ran. The runner
+  prints the classic/sdk-style split and the solutions it will prebuild.
 - **X2** The **staging** E2E/Playwright run stays **out of scope** here — it needs a live
   staging env and real secrets, and runs as a scheduled GitHub Action. A **local** E2E run
   is in scope via `--suite e2e`, which routes past the generic runner to the repo's own

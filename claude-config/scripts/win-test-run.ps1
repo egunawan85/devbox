@@ -13,7 +13,11 @@
        Concurrent invocations queue here rather than corrupt each other.
     2. Ensure LocalDB is up (SqlLocalDB start MSSQLLocalDB).
     3. dotnet test the suite's projects, emitting a TRX + console log into
-       <RepoDir>/tmp/win-test/ (win-test.sh rsyncs that back).
+       <RepoDir>/tmp/win-test/ (win-test.sh rsyncs that back). Each project is routed
+       by its SHAPE, not its name: a classic packages.config csproj is prebuilt with
+       nuget + the VS BuildTools MSBuild and tested --no-build; an SDK-style csproj
+       (<Project Sdk=...>) restores and builds itself under `dotnet test`, whichever
+       suite glob its filename happened to match.
     4. Stop LocalDB, release the lock, bump the heartbeat, garbage-collect stale
        per-branch dirs — then write tmp/win-test/done.json, the completion sentinel.
 
@@ -131,40 +135,29 @@ try {
   }
 
   # --- 3. run the suite ----------------------------------------------------------
-  # These are CLASSIC (packages.config) net4x solutions, so the recipe is the repos' own
-  # (runegate audit/TEST_STRATEGY.md + CLAUDE.md): nuget restore -> msbuild build ->
-  # dotnet test --no-build per suite project. NOT a bare `dotnet test` (that assumes
-  # PackageReference restore and would fail on packages.config). Tool paths resolve via
-  # vswhere (VS BuildTools). Verified/tuned on the first Slice-1 run against a real box.
-
-  # Which solution(s) to build. A dedicated *.Tests.sln (kash-cards has one) is
-  # self-contained, so it wins outright. Otherwise build EVERY root *.sln, not just
-  # the first: the test-project glob below spans the whole repo, and a repo can carry
-  # more than one root solution (runegate post-admin-v2 has both Runegate.sln and the
-  # net8 PGCrypto.Admin.Api.sln). Building only the alphabetically-first one left the
-  # other solution's test DLLs unbuilt, so `dotnet test --no-build` reported them as
-  # "test source file not found" — a spurious failure that looked like a suite verdict.
-  $slns = Get-ChildItem $RepoDir -Filter *.Tests.sln -ErrorAction SilentlyContinue
-  if (-not $slns) { $slns = Get-ChildItem $RepoDir -Filter *.sln -ErrorAction SilentlyContinue }
-  if (-not $slns) { throw "win-test-run: no .sln found under $RepoDir" }
-
-  $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-  $msbuild = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild `
-                        -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
-  if (-not $msbuild) { throw "win-test-run: MSBuild not found via vswhere" }
-
-  foreach ($sln in $slns) {
-    Write-Host "win-test-run: nuget restore $($sln.Name)"
-    & nuget restore $sln.FullName -NonInteractive
-    if ($LASTEXITCODE -ne 0) { throw "win-test-run: nuget restore failed for $($sln.Name) ($LASTEXITCODE)" }
-    Touch-Heartbeat
-
-    Write-Host "win-test-run: msbuild build $($sln.Name)"
-    & $msbuild $sln.FullName /t:Build /p:Configuration=Debug /m /verbosity:minimal `
-        *>&1 | Tee-Object -FilePath (Join-Path $results 'build.log') -Append
-    if ($LASTEXITCODE -ne 0) { throw "win-test-run: msbuild build failed for $($sln.Name) ($LASTEXITCODE)" }
-    Touch-Heartbeat
-  }
+  # Two build systems live behind the one `dotnet test` verdict, and the project's SHAPE
+  # — not its filename — decides which one a project gets:
+  #
+  #   classic   packages.config, .NET Framework 4.x, no Sdk attribute on <Project>. The
+  #             recipe is the repos' own (runegate audit/TEST_STRATEGY.md + CLAUDE.md):
+  #             nuget restore -> msbuild build (VS BuildTools, via vswhere) -> dotnet test
+  #             --no-build. NOT a bare `dotnet test` (that assumes PackageReference restore
+  #             and fails on packages.config). Verified/tuned on the first Slice-1 run.
+  #   sdk-style <Project Sdk="...">. PackageReference, restores and builds itself under
+  #             `dotnet test`, using the MSBuild bundled with the SDK that the project
+  #             pins. It must NOT go through the VS BuildTools MSBuild: that copy lags the
+  #             SDK (Build Tools 17.14 vs the 18.0 that SDK 10.0.400 demands), so SDK
+  #             resolution fails before a single test runs.
+  #
+  # Routing used to follow the filename — *.Tests.<Suite>.csproj meant classic, and only
+  # the 'modern' glob's *.Tests.csproj went to a self-building `dotnet test`. That broke
+  # the day a repo kept the classic names but migrated the projects: qrypto-omni's
+  # QryptoOmni.Tests.{Unit,Integration,...}.csproj are SDK-style net10, matched the
+  # classic glob, were fed to MSBuild 17, and every one failed SDK resolution with no test
+  # run. The name predicts nothing; the file's own <Project> element is the truth. Any
+  # repo that migrates off .NET Framework hits the same thing, and the E2E runner builds
+  # these same projects on this box — so the shape check is the durable fix, not a newer
+  # Build Tools.
 
   # Select test projects by naming convention (*.Tests.<Suite>.csproj); 'all' runs every
   # *.Tests.*.csproj EXCEPT E2E (live staging + real secrets — the scheduled GH Action's
@@ -176,10 +169,10 @@ try {
   # their result below) keeps §X5 itself absolute: every project we DO run must execute
   # tests. Support joined this list after a green runegate classic run reported "2
   # project(s) failed" — one of them PGCrypto.Tests.Support, which has no tests by design.
-  # 'modern' = the SDK-style net10 test projects, which follow the
-  # <Project>.Tests.csproj convention (PGCrypto.Admin.Api.Tests,
-  # PGCrypto.API.Audit.Tests, PGCrypto.Backend.Worker.Tests, ...) and so
-  # match none of the classic *.Tests.<Suite>.csproj suite globs.
+  # 'modern' = the test projects that follow the <Project>.Tests.csproj convention
+  # (PGCrypto.Admin.Api.Tests, PGCrypto.API.Audit.Tests, PGCrypto.Backend.Worker.Tests,
+  # ...) and so match none of the *.Tests.<Suite>.csproj suite globs. The glob only
+  # decides WHICH projects are in the suite; how each is built is decided per file below.
   $pattern = switch ($Suite) {
     'all'    { '*.Tests.*.csproj' }
     'modern' { '*.Tests.csproj' }
@@ -194,9 +187,98 @@ try {
                              $_.Name -notmatch '\.(Tests\.(E2E|Fixtures|Support)|(E2E|Fixtures|Support)\.Tests)\.' }
   if (-not $projects) { throw "win-test-run: no test projects matched '$pattern' under $RepoDir" }
 
+  # Shape check. SDK-style is any of the three spellings MSBuild accepts: an Sdk attribute
+  # on the root <Project>, an <Import Sdk="..."/>, or a <Sdk Name="..."/> child. A file
+  # that is none of those is classic. Regex rather than [xml]: a csproj that will not
+  # parse should fail in the build with MSBuild's own diagnostic, not here with ours.
+  function Test-SdkStyleProject([string] $Path) {
+    $text = Get-Content -Path $Path -Raw
+    return ($text -match '<Project\b[^>]*\sSdk\s*=' -or
+            $text -match '<Import\b[^>]*\sSdk\s*='  -or
+            $text -match '<Sdk\b[^>]*\sName\s*=')
+  }
+  $classic  = @($projects | Where-Object { -not (Test-SdkStyleProject $_.FullName) })
+  $sdkStyle = @($projects | Where-Object {      Test-SdkStyleProject $_.FullName  })
+  Write-Host ("win-test-run: {0} project(s) selected by '{1}': {2} classic (msbuild), {3} sdk-style (dotnet test)" -f `
+              @($projects).Count, $pattern, $classic.Count, $sdkStyle.Count)
+  foreach ($p in $sdkStyle) { Write-Host "win-test-run:   sdk-style: $($p.Name)" }
+
+  # --- 3a. prebuild the CLASSIC projects' solutions ------------------------------------
+  # Only when there is something classic to build, and only the solutions that actually
+  # contain a selected classic project. Building a solution because it sits at the repo
+  # root is what fed qrypto-omni's SDK-style solution to MSBuild 17; a solution that holds
+  # none of the classic projects we are about to test has no business in this pass.
+  #
+  # Which solutions to consider: a dedicated *.Tests.sln (kash-cards has one) is
+  # self-contained, so it wins outright. Otherwise EVERY root *.sln is a candidate, not
+  # just the first: a repo can carry more than one root solution (runegate post-admin-v2
+  # has both Runegate.sln and the net8 PGCrypto.Admin.Api.sln). Building only the
+  # alphabetically-first one left the other solution's test DLLs unbuilt, so `dotnet test
+  # --no-build` reported them as "test source file not found" — a spurious failure that
+  # looked like a suite verdict. Membership is read from the .sln's own Project() lines.
+  if ($classic.Count -gt 0) {
+    $slns = Get-ChildItem $RepoDir -Filter *.Tests.sln -ErrorAction SilentlyContinue
+    if (-not $slns) { $slns = Get-ChildItem $RepoDir -Filter *.sln -ErrorAction SilentlyContinue }
+    if (-not $slns) { throw "win-test-run: classic test projects selected but no .sln found under $RepoDir" }
+
+    function Get-SolutionProjectPaths([System.IO.FileInfo] $Sln) {
+      $dir = $Sln.DirectoryName
+      Get-Content -Path $Sln.FullName | ForEach-Object {
+        if ($_ -match '^\s*Project\("\{[^}]+\}"\)\s*=\s*"[^"]*",\s*"([^"]+)"') {
+          $rel = $Matches[1] -replace '/', '\'
+          [IO.Path]::GetFullPath((Join-Path $dir $rel))
+        }
+      }
+    }
+    $classicPaths = @($classic | ForEach-Object { $_.FullName })
+    $buildSlns = @()
+    $covered   = @{}
+    foreach ($sln in $slns) {
+      $members = @(Get-SolutionProjectPaths $sln)
+      $hit = @($classicPaths | Where-Object { $members -contains $_ })
+      if ($hit.Count -gt 0) {
+        $buildSlns += $sln
+        foreach ($h in $hit) { $covered[$h] = $true }
+      }
+    }
+    # A classic project that the membership scan places in no candidate solution: say so,
+    # then fall back to building EVERY candidate (the pre-shape-routing behaviour) rather
+    # than guess. Either the project really is unreferenced — in which case `dotnet test
+    # --no-build` will report "test source file not found" below, as it always did — or
+    # the .sln path spelling defeated the scan, in which case the full build still covers
+    # it. A throw here would turn a working classic run red on a path quirk.
+    $orphans = @($classicPaths | Where-Object { -not $covered.ContainsKey($_) })
+    if ($orphans.Count -gt 0) {
+      Write-Host ("win-test-run: WARNING classic project(s) found in none of {0}: {1} — building every candidate solution" -f `
+                  (($slns | ForEach-Object { $_.Name }) -join ', '), ($orphans -join ', '))
+      $buildSlns = @($slns)
+    }
+    Write-Host ("win-test-run: solutions to prebuild: " + (($buildSlns | ForEach-Object { $_.Name }) -join ', '))
+
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    $msbuild = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild `
+                          -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+    if (-not $msbuild) { throw "win-test-run: MSBuild not found via vswhere" }
+
+    foreach ($sln in $buildSlns) {
+      Write-Host "win-test-run: nuget restore $($sln.Name)"
+      & nuget restore $sln.FullName -NonInteractive
+      if ($LASTEXITCODE -ne 0) { throw "win-test-run: nuget restore failed for $($sln.Name) ($LASTEXITCODE)" }
+      Touch-Heartbeat
+
+      Write-Host "win-test-run: msbuild build $($sln.Name)"
+      & $msbuild $sln.FullName /t:Build /p:Configuration=Debug /m /verbosity:minimal `
+          *>&1 | Tee-Object -FilePath (Join-Path $results 'build.log') -Append
+      if ($LASTEXITCODE -ne 0) { throw "win-test-run: msbuild build failed for $($sln.Name) ($LASTEXITCODE)" }
+      Touch-Heartbeat
+    }
+  }
+  else { Write-Host "win-test-run: no classic projects selected — skipping the nuget/msbuild pass" }
+
   # Classic packages.config projects keep their VSTest adapter (e.g. xunit.runner.visualstudio)
   # in the repo-local packages dir, which dotnet test does not probe by default — without it
   # discovery finds ZERO tests and still exits 0. Hand vstest every restored adapter dir.
+  # SDK-style projects resolve their adapter through PackageReference and get none of this.
   $adapterArgs = @()
   Get-ChildItem -Path (Join-Path $RepoDir 'packages') -Recurse -Filter '*testadapter.dll' -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty DirectoryName -Unique |
@@ -237,13 +319,17 @@ try {
   $projectStats = @()
   foreach ($p in $projects) {
     $name = [IO.Path]::GetFileNameWithoutExtension($p.Name)
-    Write-Host "win-test-run: dotnet test $name"
-    # Classic suites are prebuilt by the msbuild pass above (--no-build keeps
-    # dotnet test off packages.config restore). The 'modern' SDK-style projects
-    # are not all members of a root .sln (PGCrypto.API.Audit.Tests is
-    # deliberately sln-decoupled), so let dotnet test build them itself.
-    $buildArgs = if ($Suite -eq 'modern') { @() } else { @('--no-build', '--no-restore') }
-    & dotnet test $p.FullName @buildArgs --nologo @adapterArgs @filterArgs `
+    # By shape (see 3 above), never by suite name. Classic projects were prebuilt by the
+    # msbuild pass (--no-build keeps dotnet test off packages.config restore) and need
+    # the repo-local adapter dirs. SDK-style projects restore and build themselves —
+    # they are not all members of a root .sln either (PGCrypto.API.Audit.Tests is
+    # deliberately sln-decoupled), so a solution build could not cover them anyway.
+    $isSdk = $sdkStyle.FullName -contains $p.FullName
+    $shape = if ($isSdk) { 'sdk-style' } else { 'classic' }
+    Write-Host "win-test-run: dotnet test $name ($shape)"
+    $buildArgs   = if ($isSdk) { @() } else { @('--no-build', '--no-restore') }
+    $projAdapter = if ($isSdk) { @() } else { $adapterArgs }
+    & dotnet test $p.FullName @buildArgs --nologo @projAdapter @filterArgs `
         --logger "trx;LogFileName=$name.trx" --results-directory $results `
         *>&1 | Tee-Object -FilePath (Join-Path $results "$name.log") -Append
     $rcTest = $LASTEXITCODE
