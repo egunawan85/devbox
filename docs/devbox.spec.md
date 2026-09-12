@@ -116,6 +116,16 @@ Each requirement is observable — you can check whether a given box satisfies i
   holds only az's own revocable token cache after the operator logs in, consistent with
   [E6]. For appliance profiles, `up` also writes the runner contract
   (`~/.config/devbox/<profile>/runner.env` — see win-test.spec I2) on the operator box.
+- **T6** **Test prerequisites (Linux).** A Linux box can run any project's Docker-backed
+  integration tests and Playwright / headless-Chromium tests **without a per-project sudo
+  step**: Docker Engine (Ubuntu `docker.io`, enabled at boot) with `eddyg` in the `docker`
+  group (root-equivalent — granted to the single primary user only, like its sudo; takes
+  effect at the next login); the shared libraries `playwright install-deps chromium` would
+  install, but **no browser build** (each project pins and downloads its own into
+  `~/.cache/ms-playwright`); and, while `kernel.apparmor_restrict_unprivileged_userns=1`,
+  an AppArmor profile (`playwright-chromium`) granting `userns` to Playwright's Chromium
+  binaries under that cache — never the sysctl flipped, never `--no-sandbox`. Installed
+  idempotently by the `toolchain` layer, which `up` runs (D3).
 
 ## E — Environment & secrets
 
@@ -237,6 +247,13 @@ production secrets.
   `.vault`/`.env` are real files on the encrypted disk that the watchdog wipes when the
   operator's SSH session count reaches zero (and a closed window / dropped connection
   wipes them too, not just a clean logout).
+- **V6** _(Linux, T6)_ `toolchain` reports, from a **fresh** SSH session: `docker` enabled
+  and `docker info` succeeding **without sudo**, every Chromium library installed, and the
+  `playwright-chromium` profile loaded in the kernel **as the only profile attaching to
+  those binaries** (a second one makes the attachment ambiguous and voids the grant). The
+  browser launch itself
+  (`chrome --headless --no-first-run --disable-gpu --dump-dom about:blank` exits 0) is
+  verified by a project once it has run `npx playwright install chromium`.
 
 ## Resolved decisions (2026-06-16)
 

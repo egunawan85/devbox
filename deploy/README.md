@@ -50,6 +50,7 @@ devbox status     # show the droplet
 devbox configure  # re-install config only (existing box)
 devbox render     # print the rendered cloud-init — no API calls (safe to inspect)
 devbox doctor     # check operator prereqs (machine identity, provider CLI/auth) — read-only
+devbox toolchain  # re-converge the test prerequisites (Docker + Playwright libs + AppArmor grant); `up` runs it too
 devbox vault up        # bring the vault to ready (start + init/unseal as needed)
 devbox vault load myapp # (re)push one project's ~/.config/devbox/<profile>/secrets/myapp.env
 devbox vault refresh myapp # load + re-materialize into a live session (no re-login)
@@ -153,6 +154,54 @@ re-derived from the private half). Spec: `docs/devbox.spec.md` A6.
 them, nothing automates them): `az login` (or `doctl auth init`; the `az` *binary* is
 auto-installed on Linux boxes, the *login* is yours), setting `SUBSCRIPTION_ID`, and
 editing `targets/<profile>.conf`.
+
+## Test prerequisites — Docker + Playwright (Linux)
+
+Every Linux box gets the general-purpose prerequisites for running a project's
+**Docker-backed integration tests** and **Playwright / headless-Chromium tests**, so no
+project needs its own sudo step first. It is the Linux side of the `toolchain` layer:
+`up` converges it after the vault + secrets steps, and `devbox toolchain` re-runs it on
+its own. Implementation: `install_test_prereqs` in `deploy/os/linux.sh`.
+
+| Part | What | Idempotency |
+|---|---|---|
+| Docker Engine | Ubuntu's `docker.io` (one install path — no docker-ce repo), `systemctl enable --now docker`. | `dpkg` check skips apt; `enable --now` is a no-op when already on. |
+| Docker without sudo | `eddyg` is added to the `docker` group. | Checked with `id -nG` first; `usermod -aG` only when absent. |
+| Chromium libs | The apt set `playwright install-deps chromium` installs on Ubuntu 24.04 (list pinned in `linux.sh` from Playwright's `nativeDeps.ts`, `--no-install-recommends`). **No browser build** — each project pins its own via its Playwright package. | `dpkg` check; a converged box never touches apt. |
+| AppArmor grant | `/etc/apparmor.d/playwright-chromium`: `flags=(unconfined)` + `userns` for `~eddyg/.cache/ms-playwright/chromium*/chrome*/{chrome,headless_shell,chrome-headless-shell}`. Loaded with `apparmor_parser -r`; `apparmor.service` reloads it on boot. | Rewritten + reloaded only when the content differs; re-loaded if on disk but not in the kernel. |
+
+- **docker-group membership is root-equivalent** (the socket lets you mount `/` into a
+  container as root). It goes to the box's single primary user only — the same stance as
+  that user's passwordless sudo — and **takes effect at the next login**: a shell that was
+  open during `up` keeps its old group set, so open a fresh `devbox ssh` before `docker ps`.
+  The DO cloud firewall (inbound tcp/2222 only) sits outside the box, so a container's
+  published port is never reachable from the internet even though Docker rewrites the
+  box's own iptables.
+- **Why an AppArmor profile.** Ubuntu 24.04 sets
+  `kernel.apparmor_restrict_unprivileged_userns=1`, under which Chromium cannot create
+  the user namespace its own sandbox needs and fails to launch. The profile grants that one
+  capability to Playwright's Chromium binaries only. Deliberately **not** done: setting the
+  sysctl to 0 (weakens the whole box) or running Chromium with `--no-sandbox`. The profile
+  is installed only while the sysctl reads 1; with it at 0 there is nothing to grant. Site
+  overrides go in `/etc/apparmor.d/local/playwright-chromium` (the managed file is
+  overwritten on every converge).
+- **Exactly one profile may attach to those binaries.** If a project's own test script
+  drops a second profile on `~/.cache/ms-playwright/chromium*/...` (a per-project
+  `<proj>-test-chromium`), both match with the same literal prefix, the kernel reports
+  *conflicting profile attachments*, runs Chromium plain-unconfined, and the sandbox fails
+  as if no grant existed. `toolchain` fails its verify on that and names the file; remove
+  it (`sudo apparmor_parser -R <file> && sudo rm <file>`) or park it under
+  `/etc/apparmor.d/disable/`. Project scripts should skip their own profile when
+  `playwright-chromium` is loaded.
+- **In a project** (no sudo): `npx playwright install chromium` downloads the pinned
+  browser into `~/.cache/ms-playwright`, where the grant applies. Then
+  `~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome --headless --no-first-run
+  --disable-gpu --dump-dom about:blank` must exit 0.
+- **What `toolchain` verifies** (in a fresh SSH session, so the docker group is real):
+  `docker` enabled, `docker info` **without sudo**, every Chromium lib installed, and the
+  profile present in `/sys/kernel/security/apparmor/profiles` (`sudo aa-status | grep
+  playwright` by hand). The browser launch itself is only checkable once a project has
+  installed a browser — provisioning stops at "profile loaded".
 
 ## Secrets — the on-box vault
 
@@ -326,6 +375,9 @@ exposure of Case-2 file materialization.
 - Firewall: **inbound tcp/2222 only**, outbound open.
 - Toolchain: `git`, `gh`, Node LTS, Claude Code CLI, Azure CLI (installed by `configure` —
   the box operates Azure-hosted peer deployments like win-test; `az login` is yours).
+- Test prerequisites (installed by `toolchain`, which `up` runs): Docker Engine with
+  `eddyg` in the `docker` group, the shared libraries for Playwright's Chromium, and the
+  `playwright-chromium` AppArmor userns grant — see [Test prerequisites](#test-prerequisites--docker--playwright-linux).
 - `claude-config/` installed into `~/.claude` via `install.sh`.
 
 ## First-session auth (interactive, no secrets at rest)

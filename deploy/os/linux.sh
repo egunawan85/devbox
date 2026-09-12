@@ -372,13 +372,173 @@ case "$guard" in *'"permissionDecision":"ask"'*) echo "  ok    git-write-guard f
 EOF
 }
 
+# ---- test prerequisites (Layer B — spec T6) ----------------------------------
+# What any project needs to run Docker-backed integration tests and Playwright /
+# headless-Chromium tests on the box WITHOUT a per-project sudo step. Three parts, each
+# idempotent on its own, all converged on every `up` and by the `toolchain` subcommand:
+#   1. Docker Engine — Ubuntu's docker.io (the one install path; no docker-ce repo),
+#      enabled + started, and DEVBOX_USER added to the `docker` group. docker-group
+#      membership is root-equivalent, so it goes to the box's single primary user only,
+#      exactly like its passwordless sudo. Takes effect at the NEXT login (a fresh SSH
+#      session — an already-open shell keeps its old group set).
+#   2. The shared libraries headless Chromium needs — the apt set `playwright install-deps
+#      chromium` would install (PLAYWRIGHT_CHROMIUM_DEPS below), so a project's own
+#      `npx playwright install chromium` then works unprivileged (Node LTS is on the box).
+#      No browser build is installed here: its version is pinned by each project's
+#      Playwright package, so projects download their own into ~/.cache/ms-playwright.
+#   3. An AppArmor profile granting `userns` to Playwright's Chromium binaries only.
+#      Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1, under which
+#      Chromium can't create the user namespace its own sandbox needs and fails to launch.
+#      The profile is the targeted fix: flags=(unconfined) + userns for the binaries under
+#      the user's ~/.cache/ms-playwright and nothing else. It is a capability GRANT, not a
+#      confinement profile. We never flip the sysctl (that weakens the whole box) and never
+#      run Chromium with --no-sandbox. Installed only while the sysctl reads 1 (with it
+#      at 0 nothing blocks the sandbox and the profile has nothing to grant).
+#
+# PLAYWRIGHT_CHROMIUM_DEPS = the `tools` + `chromium` package lists for 'ubuntu24.04-x64'
+# (arm64 spreads the same list) in Playwright's registry source,
+#   packages/playwright-core/src/server/registry/nativeDeps.ts  (main, 2026-09-12).
+# Pinned here rather than running `npx playwright install-deps` on each converge: that
+# would fetch an unpinned npm package every run and hand it sudo, while the apt list is
+# deterministic and a dpkg check makes the re-run a fast no-op (same pattern as every
+# other package this repo installs). If a newer Playwright adds a library, update the list.
+PLAYWRIGHT_CHROMIUM_DEPS="xvfb fonts-noto-color-emoji fonts-unifont libfontconfig1 libfreetype6
+  xfonts-cyrillic xfonts-scalable fonts-liberation fonts-ipafont-gothic fonts-wqy-zenhei
+  fonts-tlwg-loma-otf fonts-freefont-ttf
+  libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64
+  libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6
+  libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2"
+
+install_test_prereqs() {
+  local host=$1
+  log "installing test prerequisites on $host (Docker Engine + docker group, Playwright Chromium libs, AppArmor userns grant)"
+  ssh_box "$host" "PW_DEPS='$(echo $PLAYWRIGHT_CHROMIUM_DEPS)' bash -s" <<'EOF'
+set -eu
+me=$(id -un)
+pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+
+# 1+2) packages: Docker Engine + the Chromium shared libraries. One apt transaction, and
+#      only for what's missing — a converged box never touches apt.
+missing_pw=""
+for p in $PW_DEPS; do pkg_installed "$p" || missing_pw="$missing_pw $p"; done
+if ! pkg_installed docker.io || [ -n "$missing_pw" ]; then
+  sudo apt-get update -qq
+  if ! pkg_installed docker.io; then
+    echo "test-prereqs: installing docker.io"
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io
+  fi
+  if [ -n "$missing_pw" ]; then
+    echo "test-prereqs: installing Playwright Chromium libs:$missing_pw"
+    # --no-install-recommends is what `playwright install-deps` itself passes.
+    # shellcheck disable=SC2086  # intentional word-splitting of the package list
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $missing_pw
+  fi
+  for p in docker.io $PW_DEPS; do pkg_installed "$p" || { echo "test-prereqs: package $p still missing after install" >&2; exit 1; }; done
+else
+  echo "test-prereqs: docker.io + Playwright Chromium libs already installed -- nothing to do"
+fi
+
+# 1) Docker daemon on now and on every boot (enable --now is idempotent), then wait for
+#    the API so the verify step below can't race a still-starting daemon.
+sudo systemctl enable --now docker >/dev/null 2>&1 || { echo "test-prereqs: systemctl enable --now docker failed" >&2; exit 1; }
+for _ in $(seq 1 30); do sudo docker info >/dev/null 2>&1 && break; sleep 1; done
+sudo docker info >/dev/null 2>&1 || { echo "test-prereqs: docker daemon not answering (journalctl -u docker)" >&2; exit 1; }
+if id -nG "$me" | tr ' ' '\n' | grep -qx docker; then
+  echo "test-prereqs: $me already in the docker group"
+else
+  sudo usermod -aG docker "$me"
+  echo "test-prereqs: added $me to the docker group (root-equivalent) -- takes effect at the next login"
+fi
+
+# 3) AppArmor userns grant for Playwright's Chromium. Attachment covers both browser
+#    layouts Playwright has shipped: chromium-NNNN/chrome-linux/chrome (older) and
+#    chromium-NNNN/chrome-linux64/chrome + chromium_headless_shell-NNNN/
+#    chrome-headless-shell-linux64/chrome-headless-shell (current). The grant is scoped to
+#    THIS user's cache — the same single-primary-user stance as the docker group.
+restrict=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo "")
+if [ "$restrict" != "1" ]; then
+  echo "test-prereqs: kernel.apparmor_restrict_unprivileged_userns=${restrict:-absent} -- Chromium's sandbox needs no AppArmor grant here; profile not installed"
+elif ! command -v apparmor_parser >/dev/null 2>&1; then
+  echo "test-prereqs: userns is restricted but apparmor_parser is missing -- cannot install the Playwright grant" >&2; exit 1
+else
+  prof=/etc/apparmor.d/playwright-chromium
+  want="abi <abi/4.0>,
+include <tunables/global>
+
+# devbox (deploy/os/linux.sh) -- managed file, edits are overwritten on the next converge.
+# Grants unprivileged user namespaces to Playwright's Chromium builds under this user's
+# ~/.cache/ms-playwright, so Chromium's own sandbox can start while
+# kernel.apparmor_restrict_unprivileged_userns=1 (the Ubuntu 24.04 default).
+# flags=(unconfined) + userns only: a capability grant, NOT a confinement profile.
+profile playwright-chromium $HOME/.cache/ms-playwright/chromium*/chrome*/{chrome,headless_shell,chrome-headless-shell} flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/playwright-chromium>
+}"
+  if [ "$(sudo cat "$prof" 2>/dev/null || true)" != "$want" ]; then
+    printf '%s\n' "$want" | sudo tee "$prof" >/dev/null
+    sudo chmod 0644 "$prof"
+    sudo apparmor_parser -r "$prof"       # load now; apparmor.service reloads /etc/apparmor.d on boot
+    echo "test-prereqs: installed + loaded AppArmor profile playwright-chromium ($prof)"
+  elif ! sudo grep -q '^playwright-chromium ' /sys/kernel/security/apparmor/profiles; then
+    sudo apparmor_parser -r "$prof"
+    echo "test-prereqs: AppArmor profile playwright-chromium was on disk but not loaded -- loaded it"
+  else
+    echo "test-prereqs: AppArmor profile playwright-chromium already loaded"
+  fi
+  # A SECOND profile attaching to the same binaries (e.g. a per-project one a test script
+  # wrote) makes the attachment ambiguous: the kernel logs "conflicting profile
+  # attachments", runs Chromium plain-unconfined, and the grant is lost -- the sandbox
+  # fails exactly as if no profile existed. Flag it here; the verify step fails on it.
+  others=$(sudo find /etc/apparmor.d -maxdepth 1 -type f ! -name playwright-chromium -exec grep -l 'ms-playwright' {} + 2>/dev/null || true)
+  [ -z "$others" ] || echo "test-prereqs: WARNING: other AppArmor profile(s) also attach to ms-playwright binaries: $(echo $others) -- keep exactly one (see 'verify' below)" >&2
+fi
+EOF
+  # Verify in a NEW ssh session: group membership is computed at login, so this is the
+  # honest "docker without sudo" check (the install session above still had the old groups).
+  log "verifying test prerequisites"
+  ssh_box "$host" "PW_DEPS='$(echo $PLAYWRIGHT_CHROMIUM_DEPS)' bash -s" <<'EOF'
+set -u
+bad=0
+check() { if eval "$2" >/dev/null 2>&1; then echo "  ok    $1"; else echo "  FAIL  $1"; bad=$((bad+1)); fi; }
+pw_libs_ok() { local p; for p in $PW_DEPS; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || return 1; done; }
+check "docker daemon enabled"            "systemctl is-enabled --quiet docker"
+check "docker without sudo (new login)"  "docker info"
+n=0; for p in $PW_DEPS; do n=$((n+1)); done
+check "playwright chromium libs ($n pkgs)" "pw_libs_ok"
+if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null)" = "1" ]; then
+  check "apparmor playwright-chromium loaded" "sudo grep -q '^playwright-chromium ' /sys/kernel/security/apparmor/profiles"
+  others=$(sudo find /etc/apparmor.d -maxdepth 1 -type f ! -name playwright-chromium -exec grep -l 'ms-playwright' {} + 2>/dev/null || true)
+  if [ -n "$others" ]; then
+    echo "  FAIL  apparmor: only one profile attaches to ms-playwright (also: $(echo $others))"
+    echo "        two matching profiles = 'conflicting profile attachments' -> Chromium runs without the userns grant."
+    echo "        fix: sudo apparmor_parser -R <file> && sudo rm <file>   (or park it: ln -s <file> /etc/apparmor.d/disable/)"
+    bad=$((bad+1))
+  else
+    echo "  ok    apparmor: only one profile attaches to ms-playwright"
+  fi
+else
+  echo "  skip  apparmor playwright-chromium (userns not restricted on this box)"
+fi
+if [ "$bad" -eq 0 ]; then
+  echo "verify: all checks passed"
+  echo "note: a project verifies the browser itself after 'npx playwright install chromium':"
+  echo "      ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome --headless --no-first-run --disable-gpu --dump-dom about:blank  # must exit 0"
+else
+  echo "verify: $bad check(s) failed"; exit 1
+fi
+EOF
+}
+
 # ---- OS contract (called by lib/common.sh) ---------------------------------
 os_render_firstboot()        { render_cloud_init; }
 os_vault_start()             { vault_start "$1"; }
 os_autoseal_arm()            { autoseal_arm "$1"; }
 os_install_session_secrets() { install_session_secrets "$1"; }
-# No project toolchain layer for Linux (the DO box's baseline is enough); no-op for the
-# `toolchain` subcommand so it's a clean cross-OS contract.
-os_install_toolchain()       { log "no project toolchain layer for the linux profile — nothing to install"; }
+# Linux's project toolchain layer = the general-purpose test prerequisites (Docker +
+# Playwright Chromium libs + AppArmor grant). Fast no-op once converged, so `up` runs it
+# every time, and `toolchain` re-runs it on its own.
+os_install_toolchain()       { install_test_prereqs "$1"; }
 # The self-deallocation idle-monitor is a Windows-appliance concern (win-test spec L); no-op here.
 os_install_idle_monitor()    { :; }
