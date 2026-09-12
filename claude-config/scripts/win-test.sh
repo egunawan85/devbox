@@ -15,8 +15,13 @@
 #
 # Usage:
 #   win-test.sh [<worktree>] [--suite unit|integration|smoke|all|e2e|modern|full] [--clean]
-#               [--env-file <path>]
+#               [--project <name>[,<name>...]] [--env-file <path>]
 #     <worktree>   path to the checkout to test (default: the current git worktree root)
+#     --project    run exactly these test projects — the .csproj base name, e.g.
+#                  PGCrypto.Backend.Identity.Tests — of either shape, instead of a suite.
+#                  For iterating on one area: a single modern project takes a few minutes
+#                  where --suite full takes about twelve. Cannot be combined with --suite.
+#                  A name that matches no test project fails the run and lists the names.
 #     --suite      which suite to run (default: integration). 'full' runs the classic set
 #                  ('all') and then the modern set ('modern') back-to-back on ONE boot,
 #                  syncing once up front and fetching once at the end — a slice pays the
@@ -35,14 +40,23 @@
 #                  NUL-bearing fails the run before the box is even started, and the
 #                  box refuses a payload that arrives incomplete — silence here would
 #                  mean a suite that passes having verified nothing. Omitted, nothing
-#                  is forwarded and the run is byte-for-byte unchanged.
+#                  is forwarded. Forwarding also tells the runner credentials are
+#                  present, so projects the repo lists in WIN_TEST_SKIP_WITHOUT_ENV_FILE
+#                  (scripts/win-test.env) join the broad suites; without it they are left
+#                  out of 'all' and 'modern', and the summary names them in notrun=.
 #
 # Env tunables:
-#   WIN_TEST_TIMEOUT        run timeout, seconds (default 3600), applied PER SUITE — so
+#   WIN_TEST_TIMEOUT        run timeout, seconds (default 1800), applied PER SUITE — so
 #                           --suite full allows this long for the classic set and again
 #                           for the modern set. On exceed the watchdog collects
 #                           diagnostics, fetches any partial results, and exits 124 — it
-#                           never hangs indefinitely.
+#                           never hangs indefinitely. The backstop behind the per-project
+#                           limit below.
+#   WIN_TEST_PROJECT_TIMEOUT  per-project limit, seconds, enforced on the box (default: the
+#                           repo's WIN_TEST_PROJECT_TIMEOUT in scripts/win-test.env, else
+#                           600). A project past it has its test processes stopped and is
+#                           reported stalled (rc=124, named in the summary's stalled=), and
+#                           the run moves on to the next project.
 #   WIN_TEST_POLL           seconds between status polls / heartbeat lines (default 30)
 #   WIN_TEST_RUNNER_ENV     alternate runner.env path
 #   WIN_TEST_REMOTE_RUNNER  alternate box-side runner script (testing hook)
@@ -58,8 +72,9 @@ RUNNER_ENV="${WIN_TEST_RUNNER_ENV:-$HOME/.config/devbox/win-test/runner.env}"
 # Installed on the box by install.ps1. Literal $HOME on purpose: the box-side PowerShell
 # expands it; a '~' would reach pwsh -File unexpanded and fail as "not a script file".
 REMOTE_RUNNER="${WIN_TEST_REMOTE_RUNNER:-\$HOME/.claude/scripts/win-test-run.ps1}"
-TIMEOUT_S="${WIN_TEST_TIMEOUT:-3600}"
+TIMEOUT_S="${WIN_TEST_TIMEOUT:-1800}"
 POLL_S="${WIN_TEST_POLL:-30}"
+PROJECT_TIMEOUT_S="${WIN_TEST_PROJECT_TIMEOUT:-}"
 
 die() { echo "win-test: $*" >&2; exit 1; }
 
@@ -71,18 +86,33 @@ done
 # matching rsync from its toolchain install (spec §R). scp would re-copy everything.
 
 # --- args -----------------------------------------------------------------------
-WORKTREE=""; SUITE="integration"; CLEAN=0; ENV_FILE=""
+WORKTREE=""; SUITE="integration"; SUITE_SET=0; CLEAN=0; ENV_FILE=""; PROJECTS=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --suite) SUITE="${2:?--suite needs a value}"; shift 2 ;;
+    --suite) SUITE="${2:?--suite needs a value}"; SUITE_SET=1; shift 2 ;;
+    --project) PROJECTS="${PROJECTS:+$PROJECTS,}${2:?--project needs a value}"; shift 2 ;;
     --clean) CLEAN=1; shift ;;
     --env-file) ENV_FILE="${2:?--env-file needs a value}"; shift 2 ;;
-    -h|--help) sed -n '1,54p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown flag: $1" ;;
     *)  WORKTREE="$1"; shift ;;
   esac
 done
 case "$SUITE" in unit|integration|smoke|all|e2e|modern|full) ;; *) die "bad --suite: $SUITE" ;; esac
+
+# --project is its own box-side suite, 'projects': exactly the named projects, nothing else.
+# The names reach a PowerShell command string inside single quotes, so allow only what a
+# .csproj base name needs rather than trying to quote anything else.
+if [ -n "$PROJECTS" ]; then
+  [ "$SUITE_SET" = 0 ] || die "--project and --suite cannot be combined: --project runs exactly the named projects"
+  [[ $PROJECTS =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]] \
+    || die "--project: a name may contain only letters, digits, '.', '_' and '-' (several are comma-separated): $PROJECTS"
+  SUITE="projects"
+fi
+if [ -n "$PROJECT_TIMEOUT_S" ]; then
+  [[ $PROJECT_TIMEOUT_S =~ ^[1-9][0-9]*$ ]] \
+    || die "WIN_TEST_PROJECT_TIMEOUT must be a positive whole number of seconds: $PROJECT_TIMEOUT_S"
+fi
 
 # 'full' is not a box-side suite — it's "the classic set and the modern set, on ONE boot".
 # The box deallocates between runs, so running them as two invocations makes a slice pay
@@ -90,6 +120,16 @@ case "$SUITE" in unit|integration|smoke|all|e2e|modern|full) ;; *) die "bad --su
 # keeps this orchestrator-side: it works against any box whose runner already knows 'all'
 # and 'modern', with no matching box-file change to keep in step.
 if [ "$SUITE" = full ]; then SUITE_LIST="all modern"; else SUITE_LIST="$SUITE"; fi
+
+# What every generic-runner invocation carries beyond repo, suite and run id. Each value
+# is validated above or is a fixed word, so it is safe inside the box-side command string.
+# Nothing is added for e2e, whose repo-local runner takes none of these.
+RUNNER_EXTRA=""
+if [ "$SUITE" != e2e ]; then
+  if [ -n "$PROJECTS" ]; then RUNNER_EXTRA+=" -ProjectNames '$PROJECTS'"; fi
+  if [ -n "$PROJECT_TIMEOUT_S" ]; then RUNNER_EXTRA+=" -ProjectTimeoutSec $PROJECT_TIMEOUT_S"; fi
+  if [ -n "$ENV_FILE" ]; then RUNNER_EXTRA+=" -EnvFileForwarded"; fi
+fi
 
 # --- credential forwarding (--env-file) -----------------------------------------
 # Some suites configure themselves from the PROCESS ENVIRONMENT only — PGCrypto.Tests.Smoke
@@ -437,7 +477,7 @@ PSEOF
     # double-quoted string because its default spelling contains a literal $HOME for the box
     # to expand; \$LASTEXITCODE is escaped so bash leaves it for pwsh.
     ENV_BOOTSTRAP_PS="$ENV_BOOTSTRAP_PS
-& pwsh -NoProfile -File \"$REMOTE_RUNNER\" -RepoDir '$DEST' -Suite '$SUITE_RUN' -RunId '$RUN_ID'
+& pwsh -NoProfile -File \"$REMOTE_RUNNER\" -RepoDir '$DEST' -Suite '$SUITE_RUN' -RunId '$RUN_ID'$RUNNER_EXTRA
 exit \$LASTEXITCODE"
     ENC_CMD=$(printf '%s' "$ENV_BOOTSTRAP_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0) \
       || die "couldn't encode the box-side credential bootstrap"
@@ -446,7 +486,7 @@ exit \$LASTEXITCODE"
     # background-ssh + inherited-stdio + sentinel contract above is unchanged.
     "${SSH[@]}" "pwsh -NoProfile -EncodedCommand $ENC_CMD" < <(emit_env_payload) &
   else
-    "${SSH[@]}" "pwsh -NoProfile -File $REMOTE_RUNNER -RepoDir '$DEST' -Suite '$SUITE_RUN' -RunId '$RUN_ID'" </dev/null &
+    "${SSH[@]}" "pwsh -NoProfile -File $REMOTE_RUNNER -RepoDir '$DEST' -Suite '$SUITE_RUN' -RunId '$RUN_ID'$RUNNER_EXTRA" </dev/null &
   fi
   SSH_PID=$!
 

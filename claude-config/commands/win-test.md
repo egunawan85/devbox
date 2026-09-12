@@ -1,6 +1,6 @@
 ---
 description: Run this worktree's Windows-only test suite on the ephemeral Azure appliance and report the real result.
-argument-hint: '[--suite unit|integration|smoke|all|e2e|modern|full] [--clean] [--env-file <path>] [worktree]  (default: integration, current worktree)'
+argument-hint: '[--suite unit|integration|smoke|all|e2e|modern|full | --project <name>[,<name>]] [--clean] [--env-file <path>] [worktree]  (default: integration, current worktree)'
 allowed-tools: Bash(~/.claude/scripts/win-test.sh:*), Bash(~/.claude/scripts/win-test-launch.sh:*), Read, Grep, Glob
 ---
 
@@ -21,11 +21,21 @@ current git worktree; default suite is `integration`. The script:
 - rsyncs this worktree to `C:\ci\<branch>` (kept per-branch for warm incremental builds),
 - runs the suite under a box-wide lock (concurrent sessions queue — they share one LocalDB),
 - prints a heartbeat while the suite runs and watchdogs the whole thing — past
-  `WIN_TEST_TIMEOUT` (default 60 min, applied per suite) it aborts with diagnostics instead of hanging,
+  `WIN_TEST_TIMEOUT` (default 30 min, applied per suite) it aborts with diagnostics instead of hanging,
+- gives each test project its own time limit on the box (`WIN_TEST_PROJECT_TIMEOUT`, default
+  10 min): a project past it has its test processes stopped and is reported `stalled`, and
+  the run moves on to the next project,
 - fetches the TRX + console logs into `./tmp/win-test/`,
 - leaves the box running; it self-deallocates after it's been idle a while.
 
-**A run takes 5–25 minutes, which outlives a foreground command here.** For anything
+`--project <name>[,<name>]` runs exactly those test projects (the `.csproj` base name, e.g.
+`PGCrypto.Backend.Identity.Tests`), of either shape, instead of a suite. Use it while
+iterating on one area — one modern project takes a few minutes where `--suite full` takes
+about twelve — and keep `--suite full` for the run before a PR. It cannot be combined with
+`--suite`; a name that matches no project fails the run and lists the names that exist.
+
+**A run takes minutes — about 12 for `--suite full` on a warm box, more from a cold start —
+which outlives a foreground command here.** For anything
 longer than a single fast suite, run `~/.claude/scripts/win-test-launch.sh $ARGUMENTS`
 instead: same arguments, but it detaches the run, prints the log path and PID
 immediately, and appends `WRAPPER_EXIT <rc>` to the log when it finishes. Poll that log
@@ -72,7 +82,7 @@ The script's exit code mirrors the suite (0 = all passed). Exit 124 means the ru
 The run ends with a machine-readable verdict — **read this, don't scrape the log**:
 
 ```
-WIN-TEST-SUMMARY suite=all projects=4/4 passed=6782 failed=0 skipped=1 excluded=<classes> rc=0
+WIN-TEST-SUMMARY suite=all projects=3/3 passed=6782 failed=0 skipped=1 excluded=<classes> stalled=none notrun=<projects> rc=0
 ```
 
 with a `WIN-TEST-PROJECT` line per project. `--suite full` emits one summary per suite.
@@ -86,6 +96,13 @@ on the box** — they shell out to git against their own checkout, and the sync 
 rather than letting it read as full coverage. Support/Fixtures helper libraries are
 likewise not run — they contain no tests by design, and are excluded rather than counted
 as failures.
+
+`stalled=` names projects stopped at the per-project time limit. That is a stall, not a
+test verdict: report it as a possible hang in that project, with the log tail. `notrun=`
+names projects the repo marks as needing forwarded credentials (runegate's smoke suite) that
+a broad suite left out because no `--env-file` came with the run; mention it rather than let
+the count read as full coverage. A project whose tests all passed but whose test host then
+crashed fails with a line saying so — report the crash, not a failing test.
 
 **Never** mark Windows tests passed, or skipped-as-unrunnable, without an actual run here.
 If you couldn't run them, say exactly that and why — don't paper over it.

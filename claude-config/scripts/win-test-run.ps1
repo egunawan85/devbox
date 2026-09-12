@@ -37,23 +37,48 @@
 
   The run ends with one machine-readable line per project and one for the run:
 
-    WIN-TEST-PROJECT name=<proj> rc=<n> passed=<n> failed=<n> skipped=<n> total=<n>
+    WIN-TEST-PROJECT name=<proj> rc=<n> passed=<n> failed=<n> skipped=<n> total=<n> stalled=<0|1>
     WIN-TEST-SUMMARY suite=<s> projects=<ok>/<total> passed=<n> failed=<n> skipped=<n> \
-                     excluded=<classes|none> rc=<n>
+                     excluded=<classes|none> stalled=<projects|none> notrun=<projects|none> rc=<n>
+
+  stalled= names projects stopped at the per-project time limit (-ProjectTimeoutSec) —
+  a stall, never a verdict. notrun= names projects the repo marks as needing forwarded
+  credentials (WIN_TEST_SKIP_WITHOUT_ENV_FILE) that a broad suite left out because none
+  were forwarded.
 
   The summary is also carried in done.json, so the orchestrator can report the verdict
   without parsing the console log at all.
 
 .PARAMETER RepoDir   The synced worktree on the box, e.g. C:\ci\my-branch.
-.PARAMETER Suite     unit | integration | smoke | all | modern  (default: integration)
+.PARAMETER Suite     unit | integration | smoke | all | modern | projects  (default: integration).
+                     'projects' runs exactly the test projects named by -ProjectNames, of either
+                     shape, and nothing else.
 .PARAMETER RunId     Opaque id echoed into done.json so the orchestrator can tell this
                      run's sentinel from a stale one. Optional.
+.PARAMETER ProjectNames
+                     Comma-separated test project names (the .csproj base name, any case), for
+                     -Suite projects. A name that matches no test project fails the run. (Not
+                     -Projects: PowerShell variable names ignore case, so that parameter would
+                     be the same variable as the $projects list below, and assigning the list
+                     to a [string] parameter flattens it into one string.)
+.PARAMETER ProjectTimeoutSec
+                     Per-project time limit. Past it the project's test processes are stopped,
+                     the project is reported stalled (rc=124) — a stall, never a verdict — and
+                     the run moves on to the next project. 0 (the default) means the repo's
+                     WIN_TEST_PROJECT_TIMEOUT from scripts/win-test.env, else 600.
+.PARAMETER EnvFileForwarded
+                     Set by the orchestrator when --env-file forwarded credentials. Projects the
+                     repo lists in WIN_TEST_SKIP_WITHOUT_ENV_FILE join the broad suites (all,
+                     modern) only when it is set.
 #>
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)] [string] $RepoDir,
-  [ValidateSet('unit','integration','smoke','all','modern')] [string] $Suite = 'integration',
-  [string] $RunId = ''
+  [ValidateSet('unit','integration','smoke','all','modern','projects')] [string] $Suite = 'integration',
+  [string] $RunId = '',
+  [string] $ProjectNames = '',
+  [int] $ProjectTimeoutSec = 0,
+  [switch] $EnvFileForwarded
 )
 $ErrorActionPreference = 'Stop'
 
@@ -173,19 +198,78 @@ try {
   # (PGCrypto.Admin.Api.Tests, PGCrypto.API.Audit.Tests, PGCrypto.Backend.Worker.Tests,
   # ...) and so match none of the *.Tests.<Suite>.csproj suite globs. The glob only
   # decides WHICH projects are in the suite; how each is built is decided per file below.
+  # 'projects' reaches both shapes (Foo.Tests.csproj and Foo.Tests.Unit.csproj) and is then
+  # narrowed to exactly the names asked for, below.
   $pattern = switch ($Suite) {
-    'all'    { '*.Tests.*.csproj' }
-    'modern' { '*.Tests.csproj' }
-    default  { "*.Tests.$Suite.csproj" }
+    'all'      { '*.Tests.*.csproj' }
+    'modern'   { '*.Tests.csproj' }
+    'projects' { '*.Tests*.csproj' }
+    default    { "*.Tests.$Suite.csproj" }
   }
+  if ($Suite -eq 'projects' -and -not $ProjectNames.Trim()) { throw "win-test-run: -Suite projects needs -ProjectNames <name>[,<name>...]" }
+  if ($Suite -ne 'projects' -and $ProjectNames.Trim())      { throw "win-test-run: -ProjectNames is only valid with -Suite projects" }
   # The exclusion accepts either naming order: the classic suffix form
   # (Foo.Tests.E2E.csproj) and the SDK-style form the 'modern' glob reaches
   # (Foo.E2E.Tests.csproj). Matching only the classic order would let an E2E project
   # through on 'modern' — exactly the suite that must never run on this appliance.
-  $projects = Get-ChildItem -Path $RepoDir -Recurse -Filter $pattern -ErrorAction SilentlyContinue |
+  $projects = @(Get-ChildItem -Path $RepoDir -Recurse -Filter $pattern -ErrorAction SilentlyContinue |
               Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' -and
-                             $_.Name -notmatch '\.(Tests\.(E2E|Fixtures|Support)|(E2E|Fixtures|Support)\.Tests)\.' }
+                             $_.Name -notmatch '\.(Tests\.(E2E|Fixtures|Support)|(E2E|Fixtures|Support)\.Tests)\.' })
   if (-not $projects) { throw "win-test-run: no test projects matched '$pattern' under $RepoDir" }
+
+  # --- -Suite projects: exactly the named projects -----------------------------------
+  # For iterating on one area without paying for a whole suite. Names match the .csproj
+  # base name, case-insensitively. One that matches nothing fails the run and lists what
+  # does exist, rather than quietly running less than was asked for.
+  if ($Suite -eq 'projects') {
+    $byName = @{}
+    foreach ($p in $projects) { $byName[[IO.Path]::GetFileNameWithoutExtension($p.Name).ToLowerInvariant()] = $p }
+    $wanted  = @($ProjectNames -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    $missing = @($wanted | Where-Object { -not $byName.ContainsKey($_.ToLowerInvariant()) })
+    if ($missing.Count -gt 0) {
+      $known = ($projects | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) } | Sort-Object) -join ', '
+      throw ("win-test-run: no test project named {0}. Test projects in this repo: {1}" -f ($missing -join ', '), $known)
+    }
+    $projects = @($wanted | ForEach-Object { $byName[$_.ToLowerInvariant()] })
+  }
+
+  # --- projects that need forwarded credentials --------------------------------------
+  # A repo can name projects that verify nothing unless --env-file forwarded credentials
+  # (WIN_TEST_SKIP_WITHOUT_ENV_FILE in its scripts/win-test.env) — a smoke suite against a
+  # live environment that otherwise passes in a fraction of a second having checked
+  # nothing. Leave those out of the broad suites unless credentials came along, and say so
+  # in the log and the summary. Asking for one by name — its own suite, or -Suite
+  # projects — still runs it.
+  $notRun = @()
+  if (-not $EnvFileForwarded -and $Suite -in @('all', 'modern') -and $env:WIN_TEST_SKIP_WITHOUT_ENV_FILE) {
+    $needsEnv = @($env:WIN_TEST_SKIP_WITHOUT_ENV_FILE -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $notRun   = @($projects | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) } |
+                  Where-Object { $needsEnv -contains $_ })
+    if ($notRun.Count -gt 0) {
+      Write-Host ("win-test-run: not running {0} — the repo marks it as needing credentials (WIN_TEST_SKIP_WITHOUT_ENV_FILE) and none were forwarded with --env-file" -f ($notRun -join ', '))
+      $projects = @($projects | Where-Object { $notRun -notcontains [IO.Path]::GetFileNameWithoutExtension($_.Name) })
+    }
+  }
+  if (-not $projects) { throw "win-test-run: every project '$pattern' selected needs credentials, and none were forwarded with --env-file" }
+
+  # --- the per-project time limit ----------------------------------------------------
+  # A test host that stops making progress — deadlocked, or crashed and left waiting — used
+  # to hold the whole run until the orchestrator's suite timeout, and every project after
+  # it went unrun. Each project now gets its own limit. The operator's value (passed in as
+  # -ProjectTimeoutSec) wins, then the repo's scripts/win-test.env, then 600 s: several
+  # times the slowest healthy project, so reaching it means stuck, not slow.
+  if ($ProjectTimeoutSec -le 0) {
+    $ProjectTimeoutSec = 600
+    if ($env:WIN_TEST_PROJECT_TIMEOUT) {
+      $parsed = 0
+      if ([int]::TryParse($env:WIN_TEST_PROJECT_TIMEOUT, [ref]$parsed) -and $parsed -gt 0) { $ProjectTimeoutSec = $parsed }
+      else { Write-Host "win-test-run: ignoring WIN_TEST_PROJECT_TIMEOUT='$($env:WIN_TEST_PROJECT_TIMEOUT)' (not a positive whole number of seconds)" }
+    }
+  }
+  if (-not (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)) {
+    throw "win-test-run: Start-ThreadJob is unavailable (it ships with PowerShell 7), so the per-project time limit cannot be enforced"
+  }
+  Write-Host "win-test-run: per-project time limit ${ProjectTimeoutSec}s"
 
   # Shape check. SDK-style is any of the three spellings MSBuild accepts: an Sdk attribute
   # on the root <Project>, an <Import Sdk="..."/>, or a <Sdk Name="..."/> child. A file
@@ -329,14 +413,49 @@ try {
     Write-Host "win-test-run: dotnet test $name ($shape)"
     $buildArgs   = if ($isSdk) { @() } else { @('--no-build', '--no-restore') }
     $projAdapter = if ($isSdk) { @() } else { $adapterArgs }
+    # The results dir survives between runs (the sync excludes tmp/), so a TRX left by an
+    # earlier run would be read as this one's if this project never wrote its own — which is
+    # exactly what a stopped project does. Clear it first.
+    $trx = Join-Path $results "$name.trx"
+    Remove-Item $trx -Force -ErrorAction SilentlyContinue
+
+    # The per-project watchdog. A thread job inside this process — not a child process, so it
+    # holds none of the SSH session's handles — sleeps out the limit. If the project is still
+    # running then, it records the stall and stops the test processes this project started:
+    # test hosts first, which is what lets `dotnet test` itself return, then after a grace
+    # period any dotnet process still left from the project (a hung build or vstest). Start
+    # time is the ownership test: the box lock means this runner is the only one here, so
+    # anything started since the project began belongs to it.
+    $stallMarker = Join-Path $results "$name.stalled"
+    Remove-Item $stallMarker -Force -ErrorAction SilentlyContinue
+    $watchdog = Start-ThreadJob -ArgumentList $ProjectTimeoutSec, (Get-Date), $stallMarker, $PID -ScriptBlock {
+      param($limitSec, $since, $marker, $runnerPid)
+      function Stop-StartedSince([string[]] $names) {
+        Get-Process -Name $names -ErrorAction SilentlyContinue |
+          Where-Object { $_.Id -ne $runnerPid -and $(try { $_.StartTime -ge $since } catch { $false }) } |
+          Stop-Process -Force -ErrorAction SilentlyContinue
+      }
+      Start-Sleep -Seconds $limitSec
+      Set-Content -Path $marker -Value (Get-Date -Format o)
+      Stop-StartedSince @('testhost*', 'vstest.console')
+      Start-Sleep -Seconds 30
+      Stop-StartedSince @('dotnet')
+    }
+    $projOut = $null
     & dotnet test $p.FullName @buildArgs --nologo @projAdapter @filterArgs `
         --logger "trx;LogFileName=$name.trx" --results-directory $results `
-        *>&1 | Tee-Object -FilePath (Join-Path $results "$name.log") -Append
-    $rcTest = $LASTEXITCODE
+        *>&1 | Tee-Object -FilePath (Join-Path $results "$name.log") -Append | Tee-Object -Variable projOut
+    $rcTest  = $LASTEXITCODE
+    $stalled = Test-Path $stallMarker
+    Stop-Job -Job $watchdog -ErrorAction SilentlyContinue
+    Remove-Job -Job $watchdog -Force -ErrorAction SilentlyContinue
+    if ($stalled) {
+      $rcTest = 124
+      Write-Host "win-test-run: $name was still running at the ${ProjectTimeoutSec}s per-project limit, so its test processes were stopped. This is a stall, not a test verdict; the counts below are whatever finished first."
+    }
     # A project that discovers/executes zero tests must FAIL the run (spec §X5: a run that
     # could not execute is a loud failure, never a silent pass) — vstest exits 0 for it.
     $executed = 0; $passed = 0; $failedTests = 0; $total = 0
-    $trx = Join-Path $results "$name.trx"
     if (Test-Path $trx) {
         $counters    = ([xml](Get-Content $trx)).TestRun.ResultSummary.Counters
         $executed    = [int]$counters.executed
@@ -350,13 +469,22 @@ try {
     $projOk  = $true
     if ($rcTest -ne 0) { $failed++; $projOk = $false }
     elseif ($executed -eq 0) { Write-Host "win-test-run: $name executed ZERO tests — failing loud (spec X5)"; $failed++; $projOk = $false }
+    # A test host that crashes mid-run (a background thread throwing, say) aborts the run:
+    # every counter is green, only the exit code is red, and the tests the host never
+    # reached are simply missing from the counts. Say so, so the reader looks at the crash
+    # in the log instead of hunting a failing test, and doesn't take the pass count for the
+    # whole project.
+    if ($rcTest -ne 0 -and -not $stalled -and $failedTests -eq 0 -and $passed -gt 0 -and
+        (($projOut | Out-String) -match 'Test host process crashed')) {
+      Write-Host "win-test-run: $name — no test failed, but its test host crashed and the run was aborted, so tests after the crash did not run (see $name.log). Counted as a failure."
+    }
     # One machine-readable line per project, so a reader never has to correlate a
     # Passed!/Failed! console line with the project that produced it.
-    Write-Host ("WIN-TEST-PROJECT name={0} rc={1} passed={2} failed={3} skipped={4} total={5}" -f `
-                $name, $rcTest, $passed, $failedTests, $skipped, $total)
+    Write-Host ("WIN-TEST-PROJECT name={0} rc={1} passed={2} failed={3} skipped={4} total={5} stalled={6}" -f `
+                $name, $rcTest, $passed, $failedTests, $skipped, $total, [int]$stalled)
     $projectStats += [pscustomobject]@{
         Name = $name; Ok = $projOk; Passed = $passed; Failed = $failedTests
-        Skipped = $skipped; Total = $total
+        Skipped = $skipped; Total = $total; Stalled = $stalled
     }
     Touch-Heartbeat
   }
@@ -375,11 +503,16 @@ try {
   $sumSkipped = ($projectStats | Measure-Object -Property Skipped -Sum).Sum
   $okCount    = @($projectStats | Where-Object { $_.Ok }).Count
   $excludedLabel = if ($gitDependentClasses.Count -gt 0) { $gitDependentClasses -join '+' } else { 'none' }
+  # stalled= names the projects stopped at the per-project limit; notrun= the projects left
+  # out for want of forwarded credentials. Neither is a pass, so both ride in the verdict.
+  $stalledNames = @($projectStats | Where-Object { $_.Stalled } | ForEach-Object { $_.Name })
+  $stalledLabel = if ($stalledNames.Count -gt 0) { $stalledNames -join '+' } else { 'none' }
+  $notRunLabel  = if ($notRun.Count -gt 0) { $notRun -join '+' } else { 'none' }
   # No '"' anywhere in this string: it is embedded in done.json, which the orchestrator
   # reads with a sed capture bounded by the next quote.
-  $script:summary = ("WIN-TEST-SUMMARY suite={0} projects={1}/{2} passed={3} failed={4} skipped={5} excluded={6} rc={7}" -f `
+  $script:summary = ("WIN-TEST-SUMMARY suite={0} projects={1}/{2} passed={3} failed={4} skipped={5} excluded={6} stalled={7} notrun={8} rc={9}" -f `
       $Suite, $okCount, $projectStats.Count,
-      [int]$sumPassed, [int]$sumFailed, [int]$sumSkipped, $excludedLabel, $script:rc)
+      [int]$sumPassed, [int]$sumFailed, [int]$sumSkipped, $excludedLabel, $stalledLabel, $notRunLabel, $script:rc)
   Write-Host $script:summary
 }
 catch {

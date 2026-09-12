@@ -19,10 +19,11 @@
 #
 #   win-test-launch.sh --suite full          # classic + modern on one boot
 #   win-test-launch.sh --suite modern        # just the net10 projects
+#   win-test-launch.sh --project PGCrypto.Backend.Identity.Tests   # one project, either shape
 #   win-test-launch.sh /path/to/worktree --suite all --clean
 #
 # Every argument is passed through to win-test.sh untouched; this script parses only
-# enough (--suite, and the leading worktree path) to name the log file.
+# enough (--suite or --project, and the leading worktree path) to name the log file.
 #
 # Output (stdout, immediately):
 #   win-test-launch: started PID=<pid> LOG=<path>
@@ -73,16 +74,20 @@ exec 9>&-
 
 # --- work out where to put the log ----------------------------------------------
 # Mirror win-test.sh's own argument reading: the first non-flag argument is the worktree,
-# and --suite takes a value. Anything else is ignored here and simply forwarded.
+# and --suite, --project and --env-file take a value. A --project run is named for its
+# first project. Anything else is ignored here and simply forwarded.
 suite="integration"; worktree=""
 prev=""
 for a in "$@"; do
-  case "$prev" in --suite) suite="$a"; prev=""; continue ;; esac
+  case "$prev" in
+    --suite)    suite="$a"; prev=""; continue ;;
+    --project)  suite="project-${a%%,*}"; prev=""; continue ;;
+    --env-file) prev=""; continue ;;
+  esac
   case "$a" in
-    --suite) prev="--suite" ;;
-    --env-file) prev="--env-file" ;;
+    --suite|--project|--env-file) prev="$a" ;;
     -*) prev="" ;;
-    *) if [ "$prev" = "--env-file" ]; then prev=""; elif [ -z "$worktree" ]; then worktree="$a"; fi ;;
+    *) if [ -z "$worktree" ]; then worktree="$a"; fi ;;
   esac
 done
 

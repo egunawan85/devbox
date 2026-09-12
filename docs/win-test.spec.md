@@ -89,6 +89,17 @@ Each requirement is observable — you can check whether a given setup satisfies
   `QryptoOmni.Tests.<suite>.csproj` are net10, matched the classic glob, and under
   name-based routing every one failed SDK resolution before a test ran. The runner
   prints the classic/sdk-style split and the solutions it will prebuild.
+- **X1c** **`--project <name>[,<name>...]`** runs exactly the named test projects (the
+  `.csproj` base name, case-insensitive), of either shape, as the box-side suite
+  `projects` — for iterating on one area without paying for a whole suite. It cannot be
+  combined with `--suite`. A name that matches no test project fails the run and lists
+  the names that exist: running less than was asked for must never read as a pass.
+- **X1d** A repo can name projects that verify nothing without forwarded credentials
+  (`WIN_TEST_SKIP_WITHOUT_ENV_FILE` in `scripts/win-test.env`). Those are left out of the
+  broad suites (`all`, `modern`) unless `--env-file` forwarded something (§X3), and the
+  summary names them in `notrun=`; asking for one by name — its own suite, or
+  `--project` — still runs it. runegate's `PGCrypto.Tests.Smoke` is the case: without
+  staging credentials it passes in a fraction of a second having checked nothing.
 - **X2** The **staging** E2E/Playwright run stays **out of scope** here — it needs a live
   staging env and real secrets, and runs as a scheduled GitHub Action. A **local** E2E run
   is in scope via `--suite e2e`, which routes past the generic runner to the repo's own
@@ -145,10 +156,13 @@ Each requirement is observable — you can check whether a given setup satisfies
   per-project `Passed!`/`Failed!` lines out of a 200k-line log:
 
   ```
-  WIN-TEST-PROJECT name=<proj> rc=<n> passed=<n> failed=<n> skipped=<n> total=<n>
+  WIN-TEST-PROJECT name=<proj> rc=<n> passed=<n> failed=<n> skipped=<n> total=<n> stalled=<0|1>
   WIN-TEST-SUMMARY suite=<s> projects=<ok>/<total> passed=<n> failed=<n> skipped=<n> \
-                   excluded=<classes|none> rc=<n>
+                   excluded=<classes|none> stalled=<projects|none> notrun=<projects|none> rc=<n>
   ```
+
+  `stalled=` names projects stopped at the §X7a per-project limit, and `notrun=` the
+  projects §X1d left out for want of forwarded credentials; neither is a pass.
 
   The summary is also carried in the §X6 sentinel, so the orchestrator echoes it
   without reading the console log at all. It stays **absent** on paths that never reach
@@ -164,10 +178,19 @@ Each requirement is observable — you can check whether a given setup satisfies
 - **X7** The orchestrator **never blocks indefinitely**: while the suite runs it emits a
   periodic heartbeat (elapsed, remote log progress, TRX presence); it short-circuits as
   soon as the sentinel appears (killing a lingering SSH channel); and past
-  `WIN_TEST_TIMEOUT` (default 60 min, applied **per suite** — so `full` allows it once
+  `WIN_TEST_TIMEOUT` (default 30 min, applied **per suite** — so `full` allows it once
   for each) it aborts — capturing diagnostics (box power state, remote process list, log
   tail), fetching partial results — and exits **124** with an explicit "possible hang"
   message.
+- **X7a** Behind that backstop, the box-side runner gives **each test project its own time
+  limit** (`WIN_TEST_PROJECT_TIMEOUT`, default 600 s, or the repo's value in
+  `scripts/win-test.env`). A project still running at the limit has the test processes it
+  started stopped — test hosts first, then any leftover `dotnet` — is reported
+  `stalled=1` with rc 124 in its §X9 line, and the run **moves on to the next project**.
+  A stall is never a verdict. The motivating case: a unit test host that crashed on a
+  background thread partway through its run sat idle for 27 minutes, and every
+  project queued behind it waited too. The limit is enforced from a thread job inside the
+  runner, which holds none of the SSH session's handles (§X6).
 - **X8** Result fetch is **loud**: a failed fetch is reported, and a run that claims pass
   without a TRX from this run fetched locally is reported as a **failure** (green needs
   evidence — X5).
