@@ -396,7 +396,7 @@ try {
     # keep only the last.
     $expr = ($gitDependentClasses | ForEach-Object { "FullyQualifiedName!~$_" }) -join '&'
     $filterArgs = @('--filter', $expr)
-    Write-Host "win-test-run: excluding $($gitDependentClasses.Count) class(es) that need the .git dir the sync omits: $($gitDependentClasses -join ', ')"
+    Write-Host "win-test-run: excluding $($gitDependentClasses.Count) test class(es) by name (tests that need the .git dir the sync omits, plus any listed in WIN_TEST_EXCLUDE_CLASSES): $($gitDependentClasses -join ', ')"
   }
 
   $failed = 0
