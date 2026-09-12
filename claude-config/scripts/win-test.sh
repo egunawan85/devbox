@@ -64,7 +64,7 @@
 # Reads box identity from ~/.config/devbox/win-test/runner.env, which `devbox -p win-test
 # up` writes. If that file is absent, the appliance hasn't been stood up yet.
 #
-# Output: a human summary + the TRX/console log fetched into ./tmp/win-test/. Exit code
+# Output: a human summary + the TRX/console log fetched into <worktree>/tmp/win-test/. Exit code
 # mirrors the suite (0 = all passed). Fails loud; never reports green without a real run.
 set -euo pipefail
 
@@ -385,8 +385,12 @@ done
 # sentinel is what we trust.
 RUN_ID="$(date +%s).$$"
 REMOTE_RESULTS="$DEST/tmp/win-test"
-mkdir -p ./tmp/win-test
-STAMP=./tmp/win-test/.run-started   # mtime fence: TRX from THIS run are newer than it
+# Results land in the worktree under test, not the caller's current directory. A run
+# launched from one worktree for another would otherwise write its evidence into the
+# wrong checkout, where it can be mistaken for that checkout's own or overwrite it.
+RESULTS_DIR="$WORKTREE/tmp/win-test"
+mkdir -p "$RESULTS_DIR"
+STAMP="$RESULTS_DIR/.run-started"   # mtime fence: TRX from THIS run are newer than it
 touch "$STAMP"
 
 # One remote call per poll (the box's default SSH shell is PowerShell, so these run as-is;
@@ -598,10 +602,10 @@ run_rc="$overall_rc"
 timed_out="$any_timed_out"
 
 # --- 5. fetch results (loud — a swallowed fetch error reads as a clean run) ------
-echo "win-test: fetching results → ./tmp/win-test/"
+echo "win-test: fetching results → $RESULTS_DIR/"
 fetch_ok=1
 rsync -az -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
-  "$SSH_USER@$SSH_HOST:$DEST_CYG/tmp/win-test/" "./tmp/win-test/" || {
+  "$SSH_USER@$SSH_HOST:$DEST_CYG/tmp/win-test/" "$RESULTS_DIR/" || {
   fetch_ok=0
   echo "win-test: ⚠️  fetching results FAILED — they remain on the box at $DEST/tmp/win-test" >&2
 }
@@ -611,14 +615,14 @@ rsync -az -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
 # sees them.
 if [ "${lingered:-0}" = 1 ] && [ "$fetch_ok" = 1 ]; then
   echo "win-test: final runner output didn't stream; summaries from the fetched logs:"
-  find ./tmp/win-test -name '*.Tests.*.log' -newer "$STAMP" \
+  find "$RESULTS_DIR" -name '*.Tests.*.log' -newer "$STAMP" \
     -exec sh -c 'tail -2 "$1" | sed "s|^|win-test:   |"' _ {} \; 2>/dev/null || true
 fi
 
 # Green needs evidence: a pass without a TRX from this run (fetch failed, or nothing new
 # arrived) is not a pass (spec §X5).
 if [ "$run_rc" = 0 ]; then
-  fresh_trx=$(find ./tmp/win-test -name '*.trx' -newer "$STAMP" 2>/dev/null | wc -l | tr -d ' ')
+  fresh_trx=$(find "$RESULTS_DIR" -name '*.trx' -newer "$STAMP" 2>/dev/null | wc -l | tr -d ' ')
   if [ "$fetch_ok" != 1 ] || [ "$fresh_trx" = 0 ]; then
     echo "win-test: ❌ suite reported pass but no TRX from this run was fetched — refusing to report green without evidence." >&2
     run_rc=1
@@ -635,11 +639,11 @@ fi
 
 echo
 if [ "$timed_out" = 1 ]; then
-  echo "win-test: ⛔ suite '$SUITE' TIMED OUT on $VM_NAME (branch $BRANCH) after ${TIMEOUT_S}s — possible hang; not a suite verdict. Partial results (if any) in ./tmp/win-test/." >&2
+  echo "win-test: ⛔ suite '$SUITE' TIMED OUT on $VM_NAME (branch $BRANCH) after ${TIMEOUT_S}s — possible hang; not a suite verdict. Partial results (if any) in $RESULTS_DIR/." >&2
 elif [ "$run_rc" = 0 ]; then
-  echo "win-test: ✅ suite '$SUITE' passed on $VM_NAME (branch $BRANCH). Results in ./tmp/win-test/."
+  echo "win-test: ✅ suite '$SUITE' passed on $VM_NAME (branch $BRANCH). Results in $RESULTS_DIR/."
 else
-  echo "win-test: ❌ suite '$SUITE' FAILED on $VM_NAME (branch $BRANCH), exit $run_rc. See ./tmp/win-test/."
+  echo "win-test: ❌ suite '$SUITE' FAILED on $VM_NAME (branch $BRANCH), exit $run_rc. See $RESULTS_DIR/."
 fi
 echo "win-test: box left running; it self-deallocates after ${IDLE_MINUTES:-20} min idle."
 exit "$run_rc"

@@ -25,7 +25,8 @@ current git worktree; default suite is `integration`. The script:
 - gives each test project its own time limit on the box (`WIN_TEST_PROJECT_TIMEOUT`, default
   10 min): a project past it has its test processes stopped and is reported `stalled`, and
   the run moves on to the next project,
-- fetches the TRX + console logs into `./tmp/win-test/`,
+- fetches the TRX + console logs into the tested worktree's `tmp/win-test/`, wherever the
+  run was launched from,
 - leaves the box running; it self-deallocates after it's been idle a while.
 
 `--project <name>[,<name>]` runs exactly those test projects (the `.csproj` base name, e.g.

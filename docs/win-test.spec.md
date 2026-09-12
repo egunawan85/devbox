@@ -132,7 +132,9 @@ Each requirement is observable — you can check whether a given setup satisfies
   the repo-committed `<repo>/scripts/win-test.env` the box-side runner loads for
   **non-secret** config; that loader skips keys already set, so forwarded values win.
 - **X4** Each project emits a **TRX + console log** under `<repo>/tmp/win-test/`, fetched
-  back to the operator's `./tmp/win-test/`.
+  back to the **tested worktree's** `tmp/win-test/`, not the caller's current directory.
+  A run launched from one worktree for another must not land its evidence in the wrong
+  checkout, where it would be read as, or overwrite, that checkout's own results.
 - **X5** The runner's **exit code mirrors the suite** (0 iff every project passed). A run
   that could not execute (box unreachable, no config, no matching projects) is a **loud
   failure**, never a silent pass. A project that executes **zero tests** is such a
