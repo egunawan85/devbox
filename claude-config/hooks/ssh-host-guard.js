@@ -1,33 +1,35 @@
 #!/usr/bin/env node
 // ssh-host-guard.js — PreToolUse hook for Bash / PowerShell tool calls.
 //
-// Enforces an explicit allow list of SSH destinations. A shell command that opens an
-// SSH connection (ssh, scp, sftp, rsync, ssh-copy-id) is ALLOWED only when every host
-// it touches — destination and every jump hop — appears in ~/.config/devbox/ssh-allow
-// as an exact `user@ipv4`. Anything else is DENIED, with the `ssh-allow add …` line the
-// operator would run to permit it. Commands that open no connection are ignored
-// (prints nothing, exits 0 — deferring to the normal permission flow).
+// Denies every ad-hoc SSH-transport connection the agent composes: ssh, scp, sftp,
+// rsync-to-a-remote, ssh-copy-id. There is no allow list and no prompt — SSH is simply
+// not a thing the agent does on its own.
 //
-// Why an allow list and not a prompt: `Bash(ssh:*)` in permissions.ask already prompts,
-// but a prompt is a speed bump, not a boundary — it fires on the routine connection to
-// your own box as loudly as on an exfiltration attempt, and it is the agent that chose
-// the destination. The list inverts that: routine destinations are silent, and
-// everything else is refused rather than negotiated.
+// Why deny rather than ask: an SSH connection from a devbox authenticates with either
+// the operator's forwarded agent or the box's own passphrase-less machine key
+// (spec A4/A6). Both are credentials the agent should never be spending on a
+// destination it picked itself, and a prompt is a poor guard against that — it fires
+// identically for the routine case and the dangerous one, and it is the agent that
+// chose the destination. Reaching INTO a deployed VM goes through the cloud control
+// plane instead (`az vm run-command invoke`), which spends a scoped, revocable,
+// audit-logged API token rather than an SSH key.
 //
-// The list is operator-only. `ssh-allow` itself is denied to the agent in
-// permissions.deny; this hook additionally denies shell WRITES to the list file and to
-// the config payload that defines these rules (settings.json, hooks/) — otherwise the
-// agent could append its own entry, or edit the guard out, and the list would authorize
-// nothing. Reading those files stays allowed.
+// What this does NOT cover, deliberately: SSH performed INSIDE a script — `devbox ssh`,
+// `/win-test`, the vault subcommands. A hook sees the command line, not what a script
+// does once it runs. Those paths resolve their host from trusted state and are
+// unaffected; they remain the sanctioned way to reach a box.
 //
-// What this does NOT cover, deliberately: ssh that happens INSIDE a script (devbox ssh,
-// /win-test, the vault commands). A hook sees the command line, not what a script does
-// once it runs. Those paths resolve their host from trusted state and are unaffected.
+// It also denies shell WRITES to the files that define these rules (settings.json,
+// hooks/) — an agent that can edit its own guardrails has none. Reading them is fine.
 //
-// Fails closed on anything it cannot read confidently — a shell wrapper hiding the
-// command, an unexpanded variable in the host, a non-literal hostname. Fails SAFE if
-// the hook itself breaks: a crash is a non-blocking error in Claude Code, so the call
-// falls through to the `ask` rule rather than running unguarded.
+// permissions.deny in settings.json carries `Bash(ssh:*)`, which covers a command that
+// literally begins with `ssh`. This hook covers what that prefix cannot see: scp, sftp,
+// rsync to a remote, an ssh behind `sudo`/`timeout`/`nohup`, and an ssh wrapped in
+// `sh -c`. The two together are the boundary.
+//
+// Fails SAFE if the hook itself breaks: a crash is a non-blocking error in Claude Code,
+// so the call falls through to the normal permission flow rather than running unguarded
+// — and for a bare `ssh …` the settings deny still stands on its own.
 //
 // One cross-OS implementation: run via `node` on Linux, Windows, and macOS. The shell
 // parsing helpers are duplicated from git-write-guard.js rather than shared — each hook
@@ -36,44 +38,21 @@
 
 'use strict';
 const fs = require('fs');
-const os = require('os');
-const path = require('path');
-
-const ALLOW_FILE =
-  process.env.SSH_ALLOW_FILE || path.join(os.homedir(), '.config', 'devbox', 'ssh-allow');
-
-// Spelled as a full path in every operator-facing message: ~/.claude/scripts is not on
-// PATH on a devbox (the other payload scripts are invoked the same way), so a message
-// saying plain `ssh-allow` would hand the operator a command that does not resolve.
-const MANAGER = '~/.claude/scripts/ssh-allow.sh';
 
 // Commands that open an SSH-transport connection. All of them reach the same hosts with
 // the same credentials, so guarding `ssh` alone would leave the side door open.
 const SSH_CMDS = new Set(['ssh', 'scp', 'sftp', 'rsync', 'ssh-copy-id']);
 
-// Options that consume a following separate argument. A union across the tools: a
-// value mistakenly consumed costs at most a deny (fail-closed), while a value NOT
-// consumed could be mistaken for the destination (`ssh -p 2222 user@ip` reading 2222
-// as the host).
+// ssh-family options that consume a following separate argument. Needed only to tell an
+// option's VALUE from a positional destination (`ssh -p 2222 host` — 2222 is not a host).
 const OPT_WITH_ARG = new Set([
   '-b', '-c', '-D', '-E', '-e', '-F', '-I', '-i', '-J', '-L', '-l', '-m', '-O',
   '-o', '-P', '-p', '-Q', '-R', '-S', '-W', '-w', '-B', '--rsh', '--port',
 ]);
 
-// Options whose presence means the typed destination is not the whole story. Rather
-// than model OpenSSH's resolution order, refuse: each one can silently re-point the
-// connection somewhere the allow list never approved.
-//   -F  alternate ssh_config   -o Hostname=  overrides the host outright
-//   -o ProxyCommand=  runs an arbitrary program as the transport
-//   -o User=  changes the identity half of the user@ip pair
-const DANGER_O_KEYS = new Set([
-  'hostname', 'proxycommand', 'user', 'localcommand', 'permitlocalcommand', 'include',
-  'remotecommand', 'canonicalizehostname',
-]);
-
 // Shell wrappers whose argument payload is another command — a bypass vector when the
-// payload is an ssh (sh -c 'ssh evil.example'). A wrapper only counts in COMMAND
-// POSITION (the executable of a command segment), never as a file argument.
+// payload is an ssh (sh -c 'ssh host'). A wrapper only counts in COMMAND POSITION (the
+// executable of a command segment), never as a file argument.
 const WRAPPER_CMDS = new Set([
   'sh', 'bash', 'zsh', 'dash', 'ksh', 'pwsh', 'powershell', 'eval', 'xargs',
 ]);
@@ -86,15 +65,13 @@ const EXEC_PREFIX = new Set([
 ]);
 
 // Files whose contents decide what this guard permits. A shell write to any of them is
-// the agent editing its own leash, so writes are denied regardless of the allow list.
-// Reads are fine. The Edit tool is covered separately by permissions.deny.
+// the agent editing its own leash, so writes are denied. Reads are fine. The Edit tool
+// is covered separately by permissions.deny.
 const PROTECTED = [
-  /\.config\/devbox\/ssh-allow\b/,
   /\.claude\/settings\.json\b/,
   /\.claude\/hooks\//,
   /claude-config\/settings\.json\b/,
   /claude-config\/hooks\//,
-  /claude-config\/scripts\/ssh-allow\.sh\b/,
 ];
 
 // Executables that can only read. Anything else touching a protected path is a write
@@ -191,152 +168,24 @@ function sshInvocation(segment) {
   return null;
 }
 
-// ---- allow list ------------------------------------------------------------
-
-// One `user@ip` per line; a tab/space-separated `# note` and whole-line comments are
-// ignored. A missing file is an empty list — every destination then denies, which is
-// the correct posture for a guard whose policy has not been written yet.
-function loadAllowList() {
-  let raw;
-  try {
-    raw = fs.readFileSync(ALLOW_FILE, 'utf8');
-  } catch {
-    return new Set();
-  }
-  const out = new Set();
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const entry = trimmed.split(/[\s#]/)[0];
-    if (entry) out.add(entry);
-  }
-  return out;
-}
-
-// Literal dotted-quad only. Leading zeros are rejected to match ssh-allow.sh: inet_aton
-// reads 0177.0.0.1 as octal, so allowing both spellings would mean one address has two
-// names and only one of them is on the list.
-function isIPv4(h) {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
-  if (!m) return false;
-  return m.slice(1).every((o) => !(o.length > 1 && o[0] === '0') && Number(o) <= 255);
-}
-
-function currentUser() {
-  if (process.env.USER) return process.env.USER;
-  if (process.env.LOGNAME) return process.env.LOGNAME;
-  if (process.env.USERNAME) return process.env.USERNAME;
-  try { return os.userInfo().username; } catch { return ''; }
-}
-
-// A destination reaches this as it was typed. Anything the shell would still expand
-// (a variable, a substitution, a glob) is unresolvable at hook time — refuse rather
-// than guess at what it becomes.
-function unresolved(tok) {
-  return /[$`*?]/.test(tok) || tok.includes('$(');
-}
-
-// Normalize `[user@]host` into `user@host`, defaulting the user the way ssh does.
-// `-l user` supplies the user when the destination omits it; supplying both is
-// ambiguous enough to refuse.
-function normalizeDest(spec, loginUser) {
-  const at = spec.lastIndexOf('@');
-  let user = at >= 0 ? spec.slice(0, at) : '';
-  const host = at >= 0 ? spec.slice(at + 1) : spec;
-  if (user && loginUser) return { error: `both -l ${loginUser} and ${spec} name a user` };
-  if (!user) user = loginUser || currentUser();
-  if (!user) return { error: `cannot determine the login user for '${spec}'` };
-  return { user, host, entry: `${user}@${host}` };
-}
-
-// ---- inspection ------------------------------------------------------------
-
-// Walk one invocation's arguments and return every host it would contact, or an error
-// describing why the command cannot be judged safely.
-function hostsOf(inv) {
+// The destination an invocation would connect to, or null when it connects to nothing
+// (`ssh -V`, `rsync -a ./a ./b`). This is the ONLY reason the guard parses arguments:
+// a local rsync/scp must keep working, so "opens a connection" has to be distinguished
+// from "does not". Everything that does open one is denied, so no option beyond this
+// needs interpreting.
+function destinationOf(inv) {
   const { tool, args } = inv;
-  const specs = [];      // [user@]host strings, destination and jump hops alike
-  let loginUser = '';
-  let dest = null;       // ssh/sftp/ssh-copy-id: the single positional destination
-  let destIndex = -1;
-
   for (let i = 0; i < args.length; i++) {
     const t = args[i];
-
-    // -o Key=Value, joined (-oKey=Value) or separate (-o Key=Value). OpenSSH also
-    // accepts the whitespace form (-o "ProxyCommand nc %h %p"), which splitting on '='
-    // alone would read as one long key and wave straight through.
-    if (t === '-o' || (t.startsWith('-o') && t.length > 2)) {
-      const kv = (t === '-o' ? (args[++i] ?? '') : t.slice(2)).trim();
-      const m = /^([A-Za-z]+)\s*[=\s]\s*(.*)$/.exec(kv);
-      const key = (m ? m[1] : kv).toLowerCase();
-      const val = m ? m[2] : '';
-      if (key === 'proxyjump') { specs.push(...val.split(',').filter(Boolean)); continue; }
-      if (DANGER_O_KEYS.has(key)) {
-        return { error: `-o ${kv} can re-point the connection away from the named host` };
-      }
-      continue;
-    }
-
-    // Forwards turn an allowed box into a relay: -W hands the session to another
-    // host through it, and -L/-R/-D open a tunnel to one. The allow list approved the
-    // box, not everything reachable from it.
-    if (/^-[WLRD]$/.test(t)) {
-      return { error: `${t} forwards the connection on to another host through the named one` };
-    }
-
-    if (t === '-J') { specs.push(...(args[++i] ?? '').split(',').filter(Boolean)); continue; }
-    if (t === '-l') { loginUser = args[++i] ?? ''; continue; }
-    if (t === '-F') return { error: '-F names an alternate ssh_config that could re-point the host' };
-
-    // rsync's transport command. The host still comes from the remote spec, but the
-    // transport string can smuggle the same re-pointing options, so vet it.
-    if (t === '-e' || t === '--rsh' || t.startsWith('--rsh=')) {
-      const val = t.startsWith('--rsh=') ? t.slice(6) : (args[++i] ?? '');
-      if (/(^|\s)-(?:J|F)\b/.test(val) || /proxycommand|proxyjump|hostname=/i.test(val)) {
-        return { error: `the -e transport '${val}' carries its own host options` };
-      }
-      continue;
-    }
-
     if (OPT_WITH_ARG.has(t)) { i++; continue; }
-    if (t.startsWith('-')) continue;           // any other flag, joined or long-form
-
-    // Positional. ssh-family: the first one is the destination, the rest are the
-    // remote command. scp/rsync: a `host:path` is remote, a bare path is local.
-    if (tool === 'ssh' || tool === 'sftp' || tool === 'ssh-copy-id') {
-      if (dest === null) { dest = t; destIndex = i; }
-    } else {
-      const colon = t.indexOf(':');
-      // A Windows drive letter (C:\…) and a URL scheme are not remote specs.
-      if (colon > 1 && !/^[a-z]+:\/\//i.test(t)) specs.push(t.slice(0, colon));
-    }
+    if (t.startsWith('-')) continue;
+    if (tool === 'ssh' || tool === 'sftp' || tool === 'ssh-copy-id') return t;
+    // scp/rsync: a `host:path` is remote, a bare path is local. A Windows drive letter
+    // (C:\…) and a URL scheme are not remote specs.
+    const colon = t.indexOf(':');
+    if (colon > 1 && !/^[a-z]+:\/\//i.test(t)) return t.slice(0, colon);
   }
-
-  if (dest !== null) {
-    specs.push(dest);
-    // An allowed host used as a springboard: `ssh box 'ssh elsewhere'`. With the
-    // agent forwarded, the second hop runs with the operator's credentials and the
-    // allow list never saw it. Refuse the chain rather than approve half of it.
-    const remote = args.slice(destIndex + 1);
-    const hop = remote.find((t) => SSH_CMDS.has(leafOf(t)) || /(^|[\s;&|])ssh\s/.test(t));
-    if (hop) return { error: `the remote command chains another SSH connection ('${hop}')` };
-  }
-
-  if (specs.length === 0) return { hosts: [] };   // nothing connects (ssh -V, local rsync)
-
-  const hosts = [];
-  for (const spec of specs) {
-    if (unresolved(spec)) {
-      return { error: `the destination '${spec}' is not literal — the shell would still expand it` };
-    }
-    // A jump hop may carry its own :port; strip it before parsing user@host.
-    const bare = spec.replace(/:\d+$/, '');
-    const norm = normalizeDest(bare, loginUser);
-    if (norm.error) return { error: norm.error };
-    hosts.push(norm);
-  }
-  return { hosts };
+  return null;
 }
 
 // A shell write to any file that defines this guard's policy.
@@ -363,14 +212,12 @@ function emit(decision, reason) {
   process.exit(0);
 }
 
-function denyHost(entry, why) {
-  const detail = why ? `${why}. ` : '';
-  emit('deny',
-    `SSH to ${entry} is blocked: ${detail}it is not on the allow list (${ALLOW_FILE}).\n` +
-    `If this destination is yours, authorize it yourself — in the session, run:\n` +
-    `    ! ${MANAGER} add ${entry}\n` +
-    `Claude cannot add it (that is what makes the list mean anything).`);
-}
+const ADVICE =
+  'To run something on a deployed VM, use the cloud control plane instead — ' +
+  '`az vm run-command invoke -g <group> -n <vm> --command-id RunPowerShellScript ' +
+  '--scripts "..."` — which spends a scoped, revocable API token rather than an SSH ' +
+  'key. To reach a box interactively, the operator runs `devbox ssh`; to run a test ' +
+  'suite on the appliance, use /win-test. Both ssh from inside a script and are unaffected.';
 
 function main() {
   let raw;
@@ -394,78 +241,37 @@ function main() {
   const segments = cmd.split(/&&|\|\||[;|\n{}()`]/);
 
   // 1. The policy files come first: a command that rewrites them decides everything
-  //    downstream, so it is refused before any allow-list question is asked.
+  //    downstream, so it is refused before any other question is asked.
   for (const seg of segments) {
     const why = protectedWrite(seg);
     if (why) {
       emit('deny',
-        `This command ${why} a file that defines the SSH allow list or the guard ` +
-        `enforcing it. Claude is not permitted to edit its own guardrails; ask the ` +
-        `operator to make this change. Reading these files is fine.`);
+        `This command ${why} a file that defines the agent's guardrails ` +
+        `(settings.json / hooks). Claude is not permitted to edit its own guardrails; ` +
+        `ask the operator to make this change. Reading these files is fine.`);
     }
   }
 
-  // 1b. The allow-list manager itself. permissions.deny blocks the bare `ssh-allow …`
-  //     spelling; this catches the others — an absolute path, a `sh …/ssh-allow.sh`,
-  //     an exec-prefix in front. `list` stays permitted: reading the policy is fine,
-  //     and the file is readable anyway.
-  for (const seg of segments) {
-    const [leaf, rest] = execHead(seg);
-    if (leaf === null) continue;
-    let args = tokenize(rest);
-    let isManager = leaf === 'ssh-allow' || leaf === 'ssh-allow.sh';
-    if (!isManager && (EXEC_PREFIX.has(leaf) || WRAPPER_CMDS.has(leaf))) {
-      const i = args.findIndex((t) => ['ssh-allow', 'ssh-allow.sh'].includes(leafOf(t)));
-      if (i >= 0) { isManager = true; args = args.slice(i + 1); }
-    }
-    if (!isManager) continue;
-    const sub = (args.find((t) => !t.startsWith('-')) ?? '').toLowerCase();
-    if (['add', 'rm', 'remove', 'del'].includes(sub)) {
-      emit('deny',
-        `'ssh-allow ${sub}' edits the SSH allow list, which is operator-only — if Claude ` +
-        `could add its own entries the list would authorize nothing. Run it yourself:\n` +
-        `    ! ${MANAGER} ${sub} ${args.filter((t) => t.includes('@'))[0] ?? '<user@ip>'}`);
-    }
-  }
-
-  const invocations = segments.map(sshInvocation).filter(Boolean);
-
-  // 2. A wrapper in command position can hide an ssh from the parser. If the command
-  //    mentions one at all, refuse rather than approve what was not read.
+  // 2. A wrapper in command position can hide an ssh from the parser, so a command that
+  //    mentions one at all is refused rather than approved unread.
   if (segments.some(segmentHasWrapper) && /(^|[\s'"/])(ssh|scp|sftp|rsync|ssh-copy-id)\b/.test(cmd)) {
     emit('deny',
-      `This command wraps an SSH connection in a shell (sh -c / eval / xargs), so the ` +
-      `destination cannot be checked against the allow list. Run the ssh directly.`);
+      `This command wraps an SSH connection in a shell (sh -c / eval / xargs). ` +
+      `Ad-hoc SSH from this box is not permitted. ${ADVICE}`);
   }
 
-  if (invocations.length === 0) process.exit(0);   // no SSH here — defer
-
-  const allowed = loadAllowList();
-  const approved = [];
-
-  for (const inv of invocations) {
-    const result = hostsOf(inv);
-    if (result.error) {
-      emit('deny',
-        `SSH blocked: ${result.error}. The allow list holds exact user@ip destinations, ` +
-        `so a command whose real destination cannot be read is refused rather than guessed at.`);
-    }
-    for (const h of result.hosts) {
-      if (!isIPv4(h.host)) {
-        emit('deny',
-          `SSH to '${h.host}' is blocked: the allow list holds literal IPv4 addresses, and ` +
-          `'${h.host}' is a name — which a DNS record or an ~/.ssh/config entry could point ` +
-          `anywhere. Resolve it and authorize the address:\n` +
-          `    ! ${MANAGER} add ${h.user}@<ip>`);
-      }
-      if (!allowed.has(h.entry)) denyHost(h.entry, '');
-      approved.push(h.entry);
-    }
+  for (const seg of segments) {
+    const inv = sshInvocation(seg);
+    if (!inv) continue;
+    const dest = destinationOf(inv);
+    if (dest === null) continue;          // connects to nothing — local rsync, ssh -V
+    emit('deny',
+      `'${inv.tool}' to ${dest} is not permitted: this box does not make ad-hoc SSH ` +
+      `connections. Such a connection would spend either the operator's forwarded agent ` +
+      `or the box's own machine key on a destination Claude chose. ${ADVICE}`);
   }
 
-  if (approved.length === 0) process.exit(0);      // options only, nothing connects
-
-  emit('allow', `SSH destination ${[...new Set(approved)].join(', ')} is on the allow list (${ALLOW_FILE}).`);
+  process.exit(0);                        // no SSH, no policy edit — defer
 }
 
 main();

@@ -15,18 +15,12 @@
       "Edit(//**/.claude/worktrees/**)"
     ],
     "deny": [
-      "Bash(ssh-allow:*)",
-      "Bash(~/.claude/scripts/ssh-allow.sh:*)",
-      "Bash(*/ssh-allow.sh:*)",
-      "PowerShell(ssh-allow:*)",
-      "PowerShell(~/.claude/scripts/ssh-allow.sh:*)",
-      "PowerShell(*/ssh-allow.sh:*)",
-      "Edit(//**/.config/devbox/ssh-allow)",
+      "Bash(ssh:*)",
+      "PowerShell(ssh:*)",
       "Edit(//**/.claude/settings.json)",
       "Edit(//**/.claude/hooks/**)",
       "Edit(//**/claude-config/settings.json)",
       "Edit(//**/claude-config/hooks/**)",
-      "Edit(//**/claude-config/scripts/ssh-allow.sh)",
       "Edit(/tmp/**)",
       "Edit(/var/tmp/**)",
       "Bash(cd)",
@@ -64,7 +58,6 @@
       "PowerShell(chdir -*)"
     ],
     "ask": [
-      "Bash(ssh:*)",
       "Bash(git pull:*)",
       "Bash(git clone:*)",
       "Bash(git merge:*)",
@@ -78,7 +71,6 @@
       "Bash(git cherry-pick:*)",
       "Bash(git clean:*)",
       "Bash(git stash:*)",
-      "PowerShell(ssh:*)",
       "PowerShell(git pull:*)",
       "PowerShell(git clone:*)",
       "PowerShell(git merge:*)",

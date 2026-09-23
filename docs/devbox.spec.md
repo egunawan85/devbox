@@ -97,32 +97,32 @@ Each requirement is observable — you can check whether a given box satisfies i
   git write/network ops (`push`, `commit`, `merge`, `reset`, …) to `ask` on every OS,
   including the wrapped forms (`git -C`, `-c`, env-prefixed, chained, quoted exe,
   PowerShell call operator). One implementation, one home.
-- **C5** **Ad-hoc SSH is allow-listed, not prompted.** A second cross-OS guard —
-  `ssh-host-guard.js`, run via `node` — permits an agent-composed `ssh` / `scp` / `sftp`
-  / `rsync` / `ssh-copy-id` **only** to a destination recorded in
-  `~/.config/devbox/ssh-allow` as an exact `user@ipv4`; every other destination is
-  **denied**, not escalated to a prompt. A prompt asks the agent's own choice to be
-  ratified under time pressure; an allow list states the answer in advance, so the
-  routine connection to my own box is silent and everything else is refused.
-  - The list is **operator-only**. Its manager (`scripts/ssh-allow.sh`, subcommands
-    `list` / `add` / `rm`) is denied to the agent in `settings.json`, and the guard
-    additionally denies shell **writes** to the list and to the payload that defines
-    these rules (`settings.json`, `hooks/`). An agent that can widen its own allow list
-    has no allow list. I add entries myself with `! ~/.claude/scripts/ssh-allow.sh add
-    <user@ip>`; the denial message quotes the exact line.
-  - Entries are **literal IPv4 only** — no hostnames, no `~/.ssh/config` nicknames, no
-    ranges — because a name can be re-pointed by a record I never read, and the whole
-    value of the list is that what I approve is what gets connected to.
-  - **Fails closed** on what it cannot read with confidence (a shell wrapper hiding the
-    command, an unexpanded variable, a non-literal host, `-F`, `-o ProxyCommand=`/
-    `Hostname=`, a `-J` hop that is not itself listed, a port-forward or `-W` relay
-    through a listed box, an onward `ssh` in a remote command). **Fails safe** if the
-    guard itself breaks: a hook crash is non-blocking in Claude Code, so the call falls
-    back to the `Bash(ssh:*)` **ask** rule rather than running unguarded.
+- **C5** **The agent makes no ad-hoc SSH connection.** `Bash(ssh:*)` is **denied** in
+  `settings.json`, and a second cross-OS guard — `ssh-host-guard.js`, run via `node` —
+  denies the forms that prefix rule cannot see: `scp`, `sftp`, `ssh-copy-id`, `rsync` to
+  a remote, an `ssh` behind `sudo`/`timeout`/`nohup`, and an `ssh` wrapped in
+  `sh -c`/`eval`/`xargs`. Not a prompt: an SSH connection from a box spends either the
+  operator's **forwarded agent** [A4] or the box's own passphrase-less **machine key**
+  [A6], and neither is a credential the agent should spend on a destination it chose
+  itself. A prompt fires identically for the routine case and the dangerous one.
+  - **Reaching into a deployed VM goes through the cloud control plane instead** —
+    `az vm run-command invoke` — which spends a scoped, revocable, **audit-logged** API
+    token rather than an SSH key, and reaches only VMs the subscription owns. _Known
+    limitation:_ that is the whole subscription, not the VMs this repo deployed.
+    _Known gap:_ DigitalOcean has **no** control-plane equivalent (`doctl compute ssh`
+    is ordinary SSH with the operator's key), so a DO droplet has no keyless path.
+  - The guard also denies shell **writes** to the payload defining these rules
+    (`settings.json`, `hooks/`); an agent that can edit its own guardrails has none.
+    Reading them stays permitted.
+  - **Fails safe** if the guard breaks: a hook crash is non-blocking in Claude Code, so
+    the call falls through to the normal permission flow — and for a bare `ssh …` the
+    `settings.json` deny still stands on its own. The two are independent.
   - **Scope.** It gates SSH the agent *composes*. SSH performed *inside* a script —
     `devbox ssh`, `/win-test`, the vault subcommands — is invisible to a hook by
-    construction and unaffected; those paths resolve their host from trusted state
-    (A6, T5). Other egress (`curl`, `nc`, `git clone ssh://`) is out of scope by design.
+    construction and unaffected; those remain the sanctioned way to reach a box, and
+    resolve their host from trusted state (A6, T5). `git` over SSH is untouched: the
+    executable is `git`, not `ssh`. Other egress (`curl`, `nc`, `az`, `doctl`) is out of
+    scope by design.
 - **C6** The rest of the permission model matches `settings.json` in this repo.
 
 ## T — Toolchain
