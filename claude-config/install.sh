@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
 # install.sh — link the devbox claude-config payload into ~/.claude (idempotent).
 #
-# Symlinks CLAUDE.md, settings.json, hooks/git-write-guard.js, and every file under
-# commands/ and scripts/ from this repo's claude-config/ into ~/.claude, so a later
-# `git pull` updates the live config with no reinstall. New files dropped into
-# commands/ or scripts/ are picked up automatically on the next run.
+# Symlinks CLAUDE.md, settings.json, and every file under hooks/, commands/ and
+# scripts/ from this repo's claude-config/ into ~/.claude, so a later `git pull`
+# updates the live config with no reinstall. New files dropped into hooks/, commands/
+# or scripts/ are picked up automatically on the next run.
 # Never touches settings.local.json or any other ~/.claude content.
 # Safe to re-run; any pre-existing real file at a target is backed up, not clobbered.
 #
@@ -36,9 +36,16 @@ link() { # $1 = source file, $2 = destination path
 echo "devbox: installing claude-config"
 echo "  from $SRC"
 echo "  into $DEST"
-link "$SRC/CLAUDE.md"                "$DEST/CLAUDE.md"
-link "$SRC/settings.json"            "$DEST/settings.json"
-link "$SRC/hooks/git-write-guard.js" "$DEST/hooks/git-write-guard.js"
+link "$SRC/CLAUDE.md"     "$DEST/CLAUDE.md"
+link "$SRC/settings.json" "$DEST/settings.json"
+
+# Link every file under hooks/ (auto-discovers new hooks on each run). Globbed rather
+# than named one by one: a hook that settings.json references but the installer never
+# linked is a guard that silently does not run.
+for hk in "$SRC"/hooks/*; do
+  [ -e "$hk" ] || continue
+  link "$hk" "$DEST/hooks/$(basename -- "$hk")"
+done
 
 # Link every file under commands/ (auto-discovers new command files on each run).
 for cmd in "$SRC"/commands/*; do

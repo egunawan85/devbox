@@ -1,10 +1,10 @@
 # install.ps1 — link the devbox claude-config payload into ~/.claude (idempotent). Windows
 # mirror of install.sh.
 #
-# Symlinks CLAUDE.md, settings.json, hooks/git-write-guard.js, and every file under commands/
-# and scripts/ from this repo's claude-config/ into ~/.claude, so a later `git pull` updates
-# the live config with no reinstall. New files dropped into commands/ or scripts/ are picked
-# up automatically on the next run. Never touches settings.local.json or any other ~/.claude
+# Symlinks CLAUDE.md, settings.json, and every file under hooks/, commands/ and scripts/
+# from this repo's claude-config/ into ~/.claude, so a later `git pull` updates
+# the live config with no reinstall. New files dropped into hooks/, commands/ or scripts/
+# are picked up automatically on the next run. Never touches settings.local.json or any other ~/.claude
 # content. Safe to re-run; any pre-existing real file at a target is backed up, not clobbered.
 #
 # Uses symbolic links: the devbox login user is the box admin, which holds the privilege to
@@ -38,12 +38,13 @@ function Link-File([string]$src, [string]$dest) {
 Write-Host "devbox: installing claude-config"
 Write-Host "  from $SRC"
 Write-Host "  into $DEST"
-Link-File (Join-Path $SRC 'CLAUDE.md')                (Join-Path $DEST 'CLAUDE.md')
-Link-File (Join-Path $SRC 'settings.json')            (Join-Path $DEST 'settings.json')
-Link-File (Join-Path $SRC 'hooks\git-write-guard.js') (Join-Path $DEST 'hooks\git-write-guard.js')
+Link-File (Join-Path $SRC 'CLAUDE.md')     (Join-Path $DEST 'CLAUDE.md')
+Link-File (Join-Path $SRC 'settings.json') (Join-Path $DEST 'settings.json')
 
-# Link every file under commands/ and scripts/ (auto-discovers new files on each run).
-foreach ($sub in 'commands', 'scripts') {
+# Link every file under hooks/, commands/ and scripts/ (auto-discovers new files on each
+# run). hooks/ is globbed rather than named file by file: a hook that settings.json
+# references but the installer never linked is a guard that silently does not run.
+foreach ($sub in 'hooks', 'commands', 'scripts') {
   $dir = Join-Path $SRC $sub
   if (Test-Path $dir) {
     Get-ChildItem -LiteralPath $dir -File | ForEach-Object {
