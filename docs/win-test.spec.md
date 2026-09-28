@@ -42,7 +42,10 @@ Each requirement is observable — you can check whether a given setup satisfies
 - **S1** A worktree is synced to **`C:\ci\<branch>`** (`CI_DIR`), one dir per branch, via
   **rsync over SSH** — incremental, so warm rebuilds transfer only changed files.
 - **S2** The sync **excludes** VCS/build noise (`.git/`, `bin/`, `obj/`, `tmp/`,
-  `node_modules/`); the box rebuilds outputs. `--clean` wipes the branch dir first.
+  `node_modules/`); the box rebuilds outputs. `--clean` wipes the branch dir first. It
+  also excludes the root's **`.claude/worktrees/`**: pointing the runner at a main
+  checkout would otherwise ship every nested task worktree too (runegate's held 19,
+  ~11 GB) — slow, and none of it is the code under test.
 - **S3** Uncommitted working-tree edits **are** included (the point is to test in-progress
   work), so sync is from the working tree, not a git fetch.
 - **S4** Per-branch dirs are **self-garbage-collected** each run: drop dirs untouched >
@@ -89,6 +92,17 @@ Each requirement is observable — you can check whether a given setup satisfies
   `QryptoOmni.Tests.<suite>.csproj` are net10, matched the classic glob, and under
   name-based routing every one failed SDK resolution before a test ran. The runner
   prints the classic/sdk-style split and the solutions it will prebuild.
+- **X1b′** One shape routing can't infer: an **SDK-style .NET Framework** test project that
+  ProjectReferences classic packages.config **web** tiers (kash-cards' net48 xunit projects
+  over WebForms/WCF). A bare `dotnet test` can't build those tiers — no packages.config
+  restore, a VS WebApplication targets import that doesn't exist under the SDK, and
+  DotNetCompilerPlatform's `CodeTaskFactory` tasks, which Core MSBuild doesn't support — so
+  zero tests run. The repo opts in via `scripts/win-test.env`: **`WIN_TEST_PREBUILD_SLN`**
+  (repo-relative solution(s), comma-separated; each must exist inside the repo) is
+  `nuget restore`d and built with Build Tools MSBuild `/restore`, and then **every** selected
+  project runs `dotnet test --no-build`. **`WIN_TEST_SDK_PIN`** (optional, `N.N.N`) writes a
+  box-local `global.json` — only when the repo has none — so Build Tools MSBuild resolves an
+  SDK it supports (17.14 can't load 10.0.400). Undeclared, routing is unchanged.
 - **X1c** **`--project <name>[,<name>...]`** runs exactly the named test projects (the
   `.csproj` base name, case-insensitive), of either shape, as the box-side suite
   `projects` — for iterating on one area without paying for a whole suite. It cannot be

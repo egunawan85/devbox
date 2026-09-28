@@ -364,6 +364,7 @@ while :; do
   set +e
   rsync -az --delete \
     --exclude '.git/' --exclude 'bin/' --exclude 'obj/' --exclude 'tmp/' --exclude 'node_modules/' \
+    --exclude '/.claude/worktrees/' \
     -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
     "$WORKTREE/" "$SSH_USER@$SSH_HOST:$DEST_CYG/"
   sync_rc=$?

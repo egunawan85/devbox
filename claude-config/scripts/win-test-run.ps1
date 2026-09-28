@@ -281,6 +281,16 @@ try {
             $text -match '<Import\b[^>]*\sSdk\s*='  -or
             $text -match '<Sdk\b[^>]*\sName\s*=')
   }
+  # The VS Build Tools MSBuild (Full framework) — the one packages.config / web-application
+  # projects need. Used by the classic prebuild (3a) and the repo-declared prebuild (3b).
+  function Get-BuildToolsMSBuild {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    $found = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild `
+                        -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+    if (-not $found) { throw "win-test-run: MSBuild not found via vswhere" }
+    return $found
+  }
+
   $classic  = @($projects | Where-Object { -not (Test-SdkStyleProject $_.FullName) })
   $sdkStyle = @($projects | Where-Object {      Test-SdkStyleProject $_.FullName  })
   Write-Host ("win-test-run: {0} project(s) selected by '{1}': {2} classic (msbuild), {3} sdk-style (dotnet test)" -f `
@@ -339,10 +349,7 @@ try {
     }
     Write-Host ("win-test-run: solutions to prebuild: " + (($buildSlns | ForEach-Object { $_.Name }) -join ', '))
 
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    $msbuild = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild `
-                          -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
-    if (-not $msbuild) { throw "win-test-run: MSBuild not found via vswhere" }
+    $msbuild = Get-BuildToolsMSBuild
 
     foreach ($sln in $buildSlns) {
       Write-Host "win-test-run: nuget restore $($sln.Name)"
@@ -358,6 +365,56 @@ try {
     }
   }
   else { Write-Host "win-test-run: no classic projects selected — skipping the nuget/msbuild pass" }
+
+  # --- 3b. repo-declared solution prebuild (SDK-style .NET Framework tests) -------------
+  # Shape routing sends an SDK-style test project to a self-building `dotnet test`. That is
+  # wrong for one case: an SDK-style *.NET Framework* test project that ProjectReferences
+  # classic packages.config tiers (kash-cards: net48 xunit projects over WebForms/WCF web
+  # applications). Under `dotnet test`'s Core MSBuild those tiers never get their
+  # packages.config restore, import the VS WebApplication targets from a path that doesn't
+  # exist, and hit DotNetCompilerPlatform's CodeTaskFactory tasks, which Core MSBuild does not
+  # support — so nothing builds and zero tests run. Only the repo knows its projects need this,
+  # so it declares it in scripts/win-test.env:
+  #   WIN_TEST_PREBUILD_SLN  solution(s), repo-relative, comma-separated: nuget restore + a
+  #                          Build Tools MSBuild /restore build of each, after which EVERY
+  #                          selected project runs `dotnet test --no-build`.
+  #   WIN_TEST_SDK_PIN       optional .NET SDK version for a box-local global.json (written only
+  #                          when the repo has none), so Build Tools MSBuild resolves an SDK it
+  #                          supports — 17.14 cannot load SDK 10.0.400 (see 3 above).
+  # Undeclared, nothing here runs and routing is exactly as above.
+  $prebuilt = $false
+  if ($env:WIN_TEST_PREBUILD_SLN) {
+    if ($env:WIN_TEST_SDK_PIN) {
+      if ($env:WIN_TEST_SDK_PIN -notmatch '^\d+\.\d+\.\d+$') { throw "win-test-run: WIN_TEST_SDK_PIN='$($env:WIN_TEST_SDK_PIN)' is not an SDK version (N.N.N)" }
+      $globalJson = Join-Path $RepoDir 'global.json'
+      if (Test-Path $globalJson) {
+        Write-Host "win-test-run: repo has its own global.json — WIN_TEST_SDK_PIN ignored"
+      } else {
+        Set-Content -Path $globalJson -Value ('{ "sdk": { "version": "' + $env:WIN_TEST_SDK_PIN + '", "rollForward": "latestPatch" } }')
+        Write-Host "win-test-run: pinned .NET SDK $($env:WIN_TEST_SDK_PIN) via box-local global.json (repo-declared)"
+      }
+    }
+    $msbuild = Get-BuildToolsMSBuild
+    $repoRoot = [IO.Path]::GetFullPath($RepoDir).TrimEnd('\') + '\'
+    foreach ($s in @($env:WIN_TEST_PREBUILD_SLN -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+      $slnPath = [IO.Path]::GetFullPath((Join-Path $RepoDir $s))
+      if (-not $slnPath.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "win-test-run: WIN_TEST_PREBUILD_SLN entry '$s' resolves outside the repo" }
+      if (-not (Test-Path $slnPath -PathType Leaf)) { throw "win-test-run: WIN_TEST_PREBUILD_SLN entry '$s' not found under $RepoDir" }
+
+      Write-Host "win-test-run: nuget restore $s (repo-declared prebuild)"
+      & nuget restore $slnPath -NonInteractive
+      if ($LASTEXITCODE -ne 0) { throw "win-test-run: nuget restore failed for $s ($LASTEXITCODE)" }
+      Touch-Heartbeat
+
+      # /restore covers the SDK-style projects' PackageReferences in the same build.
+      Write-Host "win-test-run: msbuild /restore build $s (repo-declared prebuild)"
+      & $msbuild $slnPath /restore /t:Build /p:Configuration=Debug /m /verbosity:minimal `
+          *>&1 | Tee-Object -FilePath (Join-Path $results 'build.log') -Append
+      if ($LASTEXITCODE -ne 0) { throw "win-test-run: msbuild build failed for $s ($LASTEXITCODE)" }
+      Touch-Heartbeat
+    }
+    $prebuilt = $true
+  }
 
   # Classic packages.config projects keep their VSTest adapter (e.g. xunit.runner.visualstudio)
   # in the repo-local packages dir, which dotnet test does not probe by default — without it
@@ -411,7 +468,9 @@ try {
     $isSdk = $sdkStyle.FullName -contains $p.FullName
     $shape = if ($isSdk) { 'sdk-style' } else { 'classic' }
     Write-Host "win-test-run: dotnet test $name ($shape)"
-    $buildArgs   = if ($isSdk) { @() } else { @('--no-build', '--no-restore') }
+    # Assigned in branches, not `= if (...) { $arr }`: an if-expression unrolls a one-element
+    # array to a bare string, and splatting a string passes it character by character.
+    if ($isSdk -and -not $prebuilt) { $buildArgs = @() } else { $buildArgs = @('--no-build', '--no-restore') }
     $projAdapter = if ($isSdk) { @() } else { $adapterArgs }
     # The results dir survives between runs (the sync excludes tmp/), so a TRX left by an
     # earlier run would be read as this one's if this project never wrote its own — which is
