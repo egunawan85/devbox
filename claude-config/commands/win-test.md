@@ -75,6 +75,14 @@ fails the run loudly rather than starting a suite that would go green having ver
 nothing. Repo-committed **non-secret** config belongs in `<repo>/scripts/win-test.env`
 instead, which the box-side runner picks up on its own.
 
+If an SDK-style **.NET Framework** test project builds nothing and runs zero tests because
+it references classic packages.config web tiers (errors like `MSB4019 …
+Microsoft.WebApplication.targets was not found` or `CodeTaskFactory is not supported on the
+.NET Core version of MSBuild`), the repo declares `WIN_TEST_PREBUILD_SLN=<solution>` (and,
+if Build Tools MSBuild can't load the newest SDK, `WIN_TEST_SDK_PIN=<N.N.N>`) in its
+`scripts/win-test.env`: the runner then prebuilds that solution with Build Tools MSBuild and
+runs every project `--no-build`.
+
 The script's exit code mirrors the suite (0 = all passed). Exit 124 means the run
 **timed out — possible hang**, not a suite verdict: report it as such.
 
