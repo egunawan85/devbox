@@ -13,7 +13,9 @@
 // Exception: when cwd is inside a worktree under .claude/worktrees/ AND the command's
 // only git write ops are local-branch operations (commit/push/checkout/switch/restore/
 // merge/reset/rebase/cherry-pick/revert/rm/mv/apply/am/stash/pull — no wrapper, no other
-// write op), it emits "allow" instead — a worktree is an isolated feature branch, so
+// write op), it emits "allow" instead. The same holds when cwd is elsewhere but the command
+// cd's into such a worktree, or every git write in it is aimed there with its own
+// `git -C <worktree>`. A worktree is an isolated feature branch, so
 // these ops can only move that worktree's own HEAD / index / files, and git refuses to
 // move a branch (e.g. main) that is checked out elsewhere. Pushing just publishes the
 // branch for PR review (never a merge). clone and clean stay gated everywhere, a push
@@ -140,8 +142,10 @@ function segmentHasWrapper(segment) {
 
 // Resolve the git subcommand a single command segment runs, or null if it isn't git.
 // When `redirs` is given, the values of repo-redirecting global options (REDIRECT_OPTS)
-// are collected into it so the caller can veto the worktree auto-allow.
-function gitSubcommand(segment, redirs) {
+// are collected into it so the caller can veto the worktree auto-allow; the values of
+// `-C <path>` alone are additionally collected into `cdirs`, since a -C into a worktree
+// is also a positive signal that the segment runs there.
+function gitSubcommand(segment, redirs, cdirs) {
   const [leaf, rest] = execHead(segment);
   if (leaf !== 'git' && leaf !== 'git.exe') return null;
   const tokens = rest.split(/\s+/).filter(Boolean);
@@ -150,6 +154,7 @@ function gitSubcommand(segment, redirs) {
     const t = tokens[i];
     if (OPT_WITH_ARG.has(t)) {                      // option + its separate value
       if (redirs && REDIRECT_OPTS.has(t)) redirs.push(tokens[i + 1] ?? '');
+      if (cdirs && t === '-C') cdirs.push(tokens[i + 1] ?? '');
       i += 2; continue;
     }
     if (/^--[^=]+=/.test(t)) {                      // --opt=value
@@ -212,7 +217,7 @@ function main() {
   }
   const cdIntoWorktree = cdTargets.length > 0 &&
                          cdTargets.every((p) => /\.claude\/worktrees\//.test(slash(p)));
-  const inWorktree = /\/\.claude\/worktrees\//.test(cwd) || cdIntoWorktree;
+  const cwdInWorktree = /\/\.claude\/worktrees\//.test(cwd) || cdIntoWorktree;
 
   const ask = (sub) => {
     process.stdout.write(JSON.stringify({
@@ -238,12 +243,37 @@ function main() {
     process.exit(0);
   };
 
+  // A -C target that provably names a worktree: `.claude/worktrees/<name>` with no `..`
+  // segment (which could climb back out to the main checkout) and no `$` expansion (whose
+  // value we can't see).
+  const isWorktreeTarget = (raw) => {
+    const p = slash(raw.replace(/^['"]+|['"]+$/g, ''));
+    return /(?:^|\/)\.claude\/worktrees\/[^/]+/.test(p) &&
+           !p.includes('$') && !p.split('/').includes('..');
+  };
+
   const subs = [];
   const redirs = [];
+  // Third worktree signal: a session sitting in the main checkout that drives a worktree
+  // with `git -C <worktree> ...` instead of a cd. It holds only when EVERY git write
+  // segment carries exactly one redirect, that redirect is a -C, and it names a worktree —
+  // so `git -C <worktree> status && git push` (the push runs in the main checkout) and
+  // `git -C <worktree> --work-tree=<main> commit` still ask. Each segment is judged on its
+  // own -C; a GIT_* env assignment anywhere (GIT_DIR / GIT_WORK_TREE would re-aim git past
+  // the -C) voids it.
+  let writesViaDashC = !/\bGIT_[A-Z_]+=/.test(cmd);
   for (const seg of segments) {
-    const sub = gitSubcommand(seg, redirs);
-    if (sub && WRITE_SUBS.has(sub)) subs.push(sub);
+    const segRedirs = [];
+    const segCdirs = [];
+    const sub = gitSubcommand(seg, segRedirs, segCdirs);
+    redirs.push(...segRedirs);
+    if (!sub || !WRITE_SUBS.has(sub)) continue;
+    subs.push(sub);
+    if (!(segRedirs.length === 1 && segCdirs.length === 1 && isWorktreeTarget(segCdirs[0]))) {
+      writesViaDashC = false;
+    }
   }
+  const inWorktree = cwdInWorktree || (subs.length > 0 && writesViaDashC);
 
   // Any git segment redirected at a repo outside .claude/worktrees/ (or at an
   // unparseable target — quoted paths with spaces land here) voids the worktree
@@ -261,7 +291,9 @@ function main() {
   // `git <write-subcommand>` sequence appears anywhere, gate it. False positives only
   // cost a spurious prompt.
   const writeAlt = [...WRITE_SUBS].join('|');
-  const GIT_WRITE = new RegExp(`\\bgit\\b[\\s\\S]{0,40}?\\b(${writeAlt})\\b`);
+  // The window between `git` and the subcommand has to span global options, including a
+  // long `-C <absolute worktree path>`.
+  const GIT_WRITE = new RegExp(`\\bgit\\b[\\s\\S]{0,300}?\\b(${writeAlt})\\b`);
   let wrapperSub = null;
   if (segments.some(segmentHasWrapper)) {
     const m = GIT_WRITE.exec(cmd);
