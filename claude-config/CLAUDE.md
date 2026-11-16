@@ -84,7 +84,7 @@ otherwise do work on a repo, follow this workflow:
 
      1. Run a full check on the devbox by default, in the
         background, and only through the lock:
-        `flock -n -E 75 ~/.claude/full-check.lock <full check command>`
+        `flock -n -E 75 ~/.config/devbox/full-check.lock <full check command>`
      2. If that exits **75** straight away, another session's
         full check holds the lock. Don't retry it and don't run
         the check without the lock — run it on the ephemeral
