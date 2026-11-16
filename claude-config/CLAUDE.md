@@ -53,15 +53,51 @@ otherwise do work on a repo, follow this workflow:
      rather than locking tests against a design that may
      change — note that tests are pending, or ask me.
 
+   - **Each project says how its tests run.** Which suites
+     exist, which command is the full check, and what each
+     needs is in the project's own CLAUDE.md, not here. The
+     rules below say where a suite runs once the project has
+     said what it is.
+
+   - **Run tests on Linux where the project has a Linux
+     lane.** If the project provides a way to run a suite on
+     this devbox, use it rather than the Windows appliance.
+     Failures the project lists as known on Linux are reported
+     as such, never as flakes.
+
    - **Windows-only tests still run — via the appliance.** A
      test project that targets .NET Framework (net4x) or uses
-     SQL Server LocalDB only runs on Windows — e.g. the
-     `runegate` and `kash-cards` integration/regression suites.
-     On a Linux box that is **not** "not runnable in the
-     environment": run them on the ephemeral Windows box with
-     `/win-test`, and report the real result. Never mark Windows
-     tests passed, skipped-as-unrunnable, or faked without an
-     actual run on the box.
+     SQL Server LocalDB only runs on Windows. On a Linux box
+     that is **not** "not runnable in the environment": run
+     them on the ephemeral Windows box with `/win-test`, and
+     report the real result. Never mark Windows tests passed,
+     skipped-as-unrunnable, or faked without an actual run on
+     the box.
+
+   - **A full check runs one at a time on this devbox —
+     through a lock.** Several sessions share the devbox, and
+     two full checks at once fail on timeouts that say nothing
+     about the code. A project's _full check_ is its complete
+     test command; a quick, targeted test — one file, a
+     typecheck, a lint — is not one and needs none of this.
+
+     1. Run a full check on the devbox by default, in the
+        background, and only through the lock:
+        `flock -n -E 75 ~/.claude/full-check.lock <full check command>`
+     2. If that exits **75** straight away, another session's
+        full check holds the lock. Don't retry it and don't run
+        the check without the lock — run it on the ephemeral
+        Linux box with `/lin-test` instead, and wait there if it
+        queues. If the project's check cannot run on the Linux
+        box, wait for the lock instead: the same command
+        without `-n -E 75`.
+     3. If it runs, that is the result. The lock is released
+        when the check ends; there is nothing to unlock by hand.
+
+     Report the counts and say where it ran. A check that fails
+     on the Linux box because it needs a secret, git history, or
+     something built by hand on the devbox is a finding to
+     report, not something to work around.
 
 5. **Decide on red-team review.** When the implementation is
    complete, explicitly decide whether the change warrants:
