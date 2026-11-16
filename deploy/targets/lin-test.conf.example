@@ -1,0 +1,84 @@
+# devbox 'lin-test' profile (example) — Azure / Ubuntu, an EPHEMERAL TEST APPLIANCE.
+#
+# This is not a workspace. Its one job is to run a project's full check (build, lint,
+# tests, Docker-backed suites) somewhere other than the shared Linux devbox, then
+# deallocate. You never log in to develop on it; you drive it from the devbox via
+# `/lin-test`. See docs/lin-test.overview.md (why) and docs/lin-test.spec.md (the contract).
+#
+# A profile is a DEPLOYMENT name, not an OS (the OS is the OS= field). Copy to
+# deploy/targets/lin-test.conf (gitignored) and edit; select with:
+#   devbox -p lin-test up | status | doctor | toolchain | ssh | down
+#
+# Azure auth is interactive: run `az login` once on this machine. The subscription is
+# pinned below (SUBSCRIPTION_ID); the CLI runs `az account set` so it never depends on
+# the globally-active subscription.
+
+PROVIDER=azure
+OS=linux
+
+# Nothing of the operator's goes on this box: `up` gives it no clone of this repo, no
+# Claude config, no forwarded agent and no vault. It gets its first boot, the test
+# prerequisites and the idle monitor, and that is all. (So REPO_URL / REPO_BRANCH /
+# REPO_DIR and the vault keys of a workspace profile have no meaning here.)
+CREDENTIAL_FREE=1
+
+# --- Azure target ---
+# SUBSCRIPTION_ID: az account list --query "[?name=='<your sub>'].id" -o tsv
+# Same subscription and region as win-test; its own resource group, so `down` removes
+# exactly this appliance and nothing else.
+SUBSCRIPTION_ID=
+RESOURCE_GROUP=lin-test-rg
+REGION=southeastasia
+# D4as_v7 (4 vCPU / 16 GB, AMD) — the same generation as win-test's D4ads_v7 without the
+# local temp disk, which an appliance that deallocates between runs cannot keep anything
+# on anyway. It is the cheaper of the two ($0.228/h against $0.286/h, Linux pay-as-you-go
+# in southeastasia, November 2026), and its vCPU family had the whole quota free where
+# the Dadsv7 family was nearly spent by win-test. Four cores to match the devbox a check
+# is tuned on; 16 GB because a check builds, lints with a 4 GB heap and runs two test
+# runs beside a Postgres at once. Check quota before changing it:
+#   az vm list-usage -l southeastasia -o table
+SIZE=Standard_D4as_v7
+IMAGE=Canonical:ubuntu-24_04-lts:server:latest
+# The OS disk is the only thing that persists between runs, and it holds every branch's
+# node_modules, the Docker images and CI_MIN_FREE_GB of headroom — the image's default
+# 30 GB is too small. Premium SSD because installs are thousands of small writes. It is
+# billed while the box is deallocated (64 GB P6: about $10/month).
+OS_DISK_GB=64
+OS_DISK_SKU=Premium_LRS
+
+# The Node line the box installs (NodeSource): a major version, or "lts" for whatever is
+# newest when the box is built. Keep it on the major the devbox runs (`node --version`
+# there), so a check sees the same Node in both places — the devbox's own install is an
+# "lts" from when that meant 24, and today "lts" means 26.
+NODE_MAJOR=24
+
+# Generic name knobs shared with the common core (DROPLET_NAME is the historical key for
+# "the box"). Named for the ROLE, not the platform.
+DROPLET_NAME=lin-test
+FIREWALL_NAME=lin-test-nsg
+TAG=lin-test
+
+# --- Access (key-only SSH on a non-default port; nothing else inbound) ---
+DEVBOX_USER=eddyg
+SSH_PORT=2222
+# Evaluated on the machine that runs `devbox -p lin-test up` — normally the LINUX DEVBOX,
+# which drives this appliance. The default authorizes that box's MACHINE IDENTITY
+# (~/.ssh/id_ed25519, no passphrase — devbox spec A6), so unattended /lin-test runs with
+# no forwarded agent can log in. Verify prereqs with: devbox -p lin-test doctor
+# Revoke by re-provisioning, or by removing the key from the box's authorized_keys.
+SSH_PUBKEY_FILES="$HOME/.ssh/id_ed25519.pub"
+
+# --- Appliance behavior (consumed by the lin-test runner + the box idle-monitor) ---
+# Propagated into ~/.config/devbox/lin-test/runner.env by `up`.
+# Where synced worktrees land on the box: $CI_DIR/<repo>/<branch>, kept between runs so
+# installs and builds stay warm.
+CI_DIR=/srv/ci
+# Self-GC: prune per-branch dirs unused longer than this, plus any whose branch no longer
+# exists in the repo; evict the least recently used when free disk drops below
+# CI_MIN_FREE_GB.
+CI_RETAIN_DAYS=14
+CI_MIN_FREE_GB=20
+# Idle-monitor: the box deallocates itself when no run is active AND it has been idle
+# this long. Doubles as the crash-safety net (stops the box even if a run dies
+# mid-flight). Shorter than win-test's 20 because a Linux box is back in about a minute.
+IDLE_MINUTES=10

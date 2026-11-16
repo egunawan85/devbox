@@ -45,7 +45,19 @@ load_conf() {
   case "$OS"       in ''|*[!a-z]*) die "OS must be lowercase letters, got '$OS'";; esac
   : "${DROPLET_NAME:?}" "${REGION:?}" "${SIZE:?}" "${IMAGE:?}" "${TAG:?}"
   : "${FIREWALL_NAME:?}" "${DEVBOX_USER:?}" "${SSH_PORT:?}" "${SSH_PUBKEY_FILES:?}"
-  : "${REPO_URL:?}" "${REPO_BRANCH:?}" "${REPO_DIR:?}"
+  # CREDENTIAL_FREE=1 marks a box that must hold nothing of the operator's: `up` gives it
+  # no clone of this repo, no Claude config, no forwarded agent and no vault — only the
+  # first boot, the toolchain layer and (for an appliance) its idle monitor. Opt-in per
+  # profile; every other profile is a workspace and behaves as it always has.
+  : "${CREDENTIAL_FREE:=0}"
+  case "$CREDENTIAL_FREE" in 0|1) ;; *) die "CREDENTIAL_FREE must be 0 or 1, got '$CREDENTIAL_FREE'";; esac
+  if [ "$CREDENTIAL_FREE" = 1 ]; then
+    # The Windows paths deliver their runner by pushing this repo to the box, so a
+    # credential-free Windows box has no way to receive one yet.
+    [ "$OS" = linux ] || die "CREDENTIAL_FREE=1 is only supported with OS=linux (profile '$DEVBOX_PROFILE' has OS=$OS)"
+  else
+    : "${REPO_URL:?}" "${REPO_BRANCH:?}" "${REPO_DIR:?}"
+  fi
   # Validate the values that get interpolated into sed/ssh/cloud-init (guards L1).
   case "$SSH_PORT" in ''|*[!0-9]*) die "SSH_PORT must be numeric, got '$SSH_PORT'";; esac
   [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] || die "SSH_PORT out of range"
@@ -222,8 +234,8 @@ emit_runner_env() {
   [ -n "${RESOURCE_GROUP:-}" ] || die "CI_DIR is set but RESOURCE_GROUP is empty — appliance profiles need the Azure resource group"
   umask 077; mkdir -p "$DEVBOX_HOME"
   cat > "$DEVBOX_HOME/runner.env" <<EOF
-# Written by 'devbox -p $DEVBOX_PROFILE up' — box identity + tunables for the win-test
-# runner (~/.claude/scripts/win-test.sh). Regenerated on every 'up'; edit the profile
+# Written by 'devbox -p $DEVBOX_PROFILE up' — box identity + tunables for the $DEVBOX_PROFILE
+# runner (~/.claude/scripts/$DEVBOX_PROFILE.sh). Regenerated on every 'up'; edit the profile
 # conf, not this file.
 RESOURCE_GROUP=$RESOURCE_GROUP
 VM_NAME=$DROPLET_NAME
@@ -237,7 +249,7 @@ CI_MIN_FREE_GB=${CI_MIN_FREE_GB:-20}
 IDLE_MINUTES=${IDLE_MINUTES:-20}
 EOF
   chmod 600 "$DEVBOX_HOME/runner.env"
-  log "wrote appliance runner config -> $DEVBOX_HOME/runner.env (read by /win-test)"
+  log "wrote appliance runner config -> $DEVBOX_HOME/runner.env (read by /$DEVBOX_PROFILE)"
 }
 
 # One command, end to end: provision (if absent) -> configure -> vault ready -> load
@@ -256,10 +268,14 @@ cmd_up() {
     ip="$PROVISIONED_IP"
   fi
   cmd_configure --host "$ip"
-  emit_runner_env "$ip"       # appliance profiles: write runner.env for /win-test (no-op otherwise)
-  VAULT_HOST="$ip"            # reuse this IP for the vault steps (no extra lookups)
-  vault_bringup              # start OpenBao + init/unseal as needed
-  vault_load_all             # push every $SECRETS_DIR .env
+  emit_runner_env "$ip"       # appliance profiles: write runner.env for the runner (no-op otherwise)
+  if [ "$CREDENTIAL_FREE" = 1 ]; then
+    log "profile '$DEVBOX_PROFILE' is credential-free — no vault, no secrets loaded"
+  else
+    VAULT_HOST="$ip"            # reuse this IP for the vault steps (no extra lookups)
+    vault_bringup              # start OpenBao + init/unseal as needed
+    vault_load_all             # push every $SECRETS_DIR .env
+  fi
   os_install_toolchain "$ip" # Layer B: linux: test prerequisites (Docker + Playwright Chromium
                              # libs + AppArmor userns grant; fast no-op once converged);
                              # windows: project build stack (~20-30 min on a fresh box, skipped
@@ -285,6 +301,13 @@ cmd_configure() {
   # Pin the box host key WITHOUT forwarding the agent first, so the agent is never
   # exposed to an unverified host (M2). After this, -A uses strict verification.
   ssh_box "$host" 'exit 0'   # pin host key; 'exit 0' is a no-op in both bash and PowerShell
+  if [ "$CREDENTIAL_FREE" = 1 ]; then
+    # Nothing of the operator's goes on this box: no repo clone (which would forward the
+    # agent to it), no Claude config, no session secrets. Its first boot and the toolchain
+    # layer are the whole of its configuration.
+    log "profile '$DEVBOX_PROFILE' is credential-free — host key pinned; no repo, config or secrets installed"
+    return 0
+  fi
   log "configuring $DEVBOX_USER@$host (clone/pull repo + install config)"
   os_configure "$host"                # OS-specific: clone/pull + install + verify
   os_install_session_secrets "$host"  # opt-in: only if a local secrets.map exists
@@ -297,7 +320,9 @@ cmd_ssh() {
   [ -n "$ip" ] || { prov_ready; ip=$(prov_ip); }
   [ -n "$ip" ] || die "no box named '$DROPLET_NAME'"
   ssh_box "$ip" 'exit 0'   # pin host key (no agent) before forwarding (M2); cross-shell no-op
-  exec ssh -A -p "$SSH_PORT" -o StrictHostKeyChecking=yes "$DEVBOX_USER@$ip"
+  # A credential-free box never sees the operator's agent, interactive sessions included.
+  local fwd=-A; [ "$CREDENTIAL_FREE" = 1 ] && fwd=-a
+  exec ssh "$fwd" -p "$SSH_PORT" -o StrictHostKeyChecking=yes "$DEVBOX_USER@$ip"
 }
 
 # ---- vault (prod-mode OpenBao on the box, gated by SSH) --------------------
@@ -709,6 +734,7 @@ vault_status() {
 
 cmd_vault() {
   load_conf   # sets VAULT_MOUNT / SECRETS_DIR / VAULT_KEYS_FILE defaults
+  [ "$CREDENTIAL_FREE" = 1 ] && die "profile '$DEVBOX_PROFILE' is credential-free — it has no vault, by design"
   local action=${1:-}; shift || true
   case "$action" in
     up)      vault_up ;;

@@ -1,4 +1,4 @@
-# azure.sh — Azure provider for the devbox CLI (the 'windows' profile). Implements the
+# azure.sh — Azure provider for the devbox CLI (Windows and Linux images). Implements the
 # provider contract (prov_*) that lib/common.sh calls; sourced after common.sh when
 # PROVIDER=azure. Uses the `az` CLI — Azure itself is the source of truth (no state file).
 # Idempotency is keyed on the VM name (DROPLET_NAME) within a resource group.
@@ -47,8 +47,8 @@ az_persist_token_cache_pref() {
 
 # Validate the Azure-specific config this provider needs (the core validates the rest).
 az_require_conf() {
-  : "${SUBSCRIPTION_ID:?set SUBSCRIPTION_ID in the windows profile config (deploy/targets/windows.conf)}"
-  : "${RESOURCE_GROUP:?set RESOURCE_GROUP in the windows profile config}"
+  : "${SUBSCRIPTION_ID:?set SUBSCRIPTION_ID in the profile config (deploy/targets/$DEVBOX_PROFILE.conf)}"
+  : "${RESOURCE_GROUP:?set RESOURCE_GROUP in the profile config (deploy/targets/$DEVBOX_PROFILE.conf)}"
 }
 
 # prov_ready — ensure az is installed + logged in, and select the pinned subscription.
@@ -92,7 +92,9 @@ prov_status() {
     -o table 2>/dev/null \
     || { log "no VM '$DROPLET_NAME' in resource group '$RESOURCE_GROUP' (subscription $SUBSCRIPTION_ID)"; return 0; }
   local ip; ip=$(prov_ip)
-  [ -n "$ip" ] && log "ssh: ssh -A -p $SSH_PORT $DEVBOX_USER@$ip"
+  # A credential-free box is never offered the operator's agent, so the hint doesn't either.
+  local fwd=-A; [ "${CREDENTIAL_FREE:-0}" = 1 ] && fwd=-a
+  [ -n "$ip" ] && log "ssh: ssh $fwd -p $SSH_PORT $DEVBOX_USER@$ip"
 }
 
 # ensure_resource_group — create the RG if absent (free; idempotent). Used by prov_provision
@@ -120,14 +122,96 @@ ensure_nsg() {
   || die "failed to set NSG allow-ssh rule"
 }
 
-# prov_provision — RG + NSG + Windows VM (no RDP rule) + first-boot provision.ps1 via the
-# Custom Script Extension, then return once the box is reachable. Sets PROVISIONED_IP. The
-# admin password Azure requires at create is random and discarded: it is never used (no RDP
-# path; SSH is key-only), so it can't be a standing credential.
+# prov_provision — RG + NSG + VM (inbound tcp/$SSH_PORT only) + first boot, then return
+# once the box is reachable. Sets PROVISIONED_IP. The image's OS decides how the first
+# boot is delivered; everything around it is shared.
 prov_provision() {
-  need openssl
   ensure_resource_group
   ensure_nsg
+  case "$OS" in
+    windows) az_create_windows_vm ;;
+    linux)   az_create_linux_vm ;;
+    *) die "the azure provider has no VM recipe for OS='$OS'" ;;
+  esac
+}
+
+# Linux: no password exists at all — the login user is created key-only from
+# SSH_PUBKEY_FILES, and first boot is cloud-init, handed over as custom data. The VM is
+# reachable only once cloud-init has moved sshd to $SSH_PORT (the NSG admits nothing
+# else), so "ready" is the OS module's readiness probe, not the create call returning.
+# OS_DISK_GB / OS_DISK_SKU are optional; unset, Azure's defaults for the image apply.
+az_create_linux_vm() {
+  local f keys=() disk=() ud
+  for f in $SSH_PUBKEY_FILES; do
+    [ -f "$f" ] || die "ssh public key not found: $f"
+    keys+=("$f")
+  done
+  [ -n "${OS_DISK_GB:-}" ]  && disk+=(--os-disk-size-gb "$OS_DISK_GB")
+  [ -n "${OS_DISK_SKU:-}" ] && disk+=(--storage-sku "$OS_DISK_SKU")
+  ud=$(mktemp "${TMPDIR:-/tmp}/devbox-cloud-init.XXXXXX")
+  os_render_firstboot > "$ud" || { rm -f "$ud"; die "could not render the first-boot config"; }
+  log "creating VM '$DROPLET_NAME' ($SIZE, $IMAGE, $REGION) — key-only SSH, inbound tcp/$SSH_PORT only"
+  if ! az vm create -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
+        --image "$IMAGE" --size "$SIZE" \
+        --admin-username "$DEVBOX_USER" --authentication-type ssh --ssh-key-values "${keys[@]}" \
+        --custom-data "$ud" "${disk[@]}" \
+        --nsg "$FIREWALL_NAME" --nsg-rule NONE \
+        --public-ip-sku Standard --tags "$TAG" -o none; then
+    rm -f "$ud"; die "az vm create failed"
+  fi
+  rm -f "$ud"
+  local ip; ip=$(prov_wait_ip) || die "VM created but no public IP appeared within ~60s"
+  log "VM at $ip — waiting for cloud-init (packages, Node, sshd on $SSH_PORT)"
+  wait_box_ready "$ip" \
+    || die "VM '$DROPLET_NAME' ($ip) never reported ready within ${READINESS_TIMEOUT}s — check the serial log: az vm boot-diagnostics get-boot-log -g $RESOURCE_GROUP -n $DROPLET_NAME"
+  PROVISIONED_IP="$ip"
+}
+
+# az_ensure_self_deallocator — let the VM turn ITSELF off, and nothing more. Two
+# idempotent layers, re-ensured on every call:
+#   1. a system-assigned managed identity on the VM — how the box calls ARM with no
+#      credential stored on it (its watcher gets tokens from the metadata service);
+#   2. the single-action custom role devbox-self-deallocator (deallocate, nothing else),
+#      scoped to THIS VM only and granted to that identity — a compromised box can turn
+#      itself off, and that is all.
+# Shared by every appliance profile, whatever its OS; the watcher itself is the OS
+# module's business.
+az_ensure_self_deallocator() {
+  need az
+  log "ensuring managed identity + deallocate-only role on $DROPLET_NAME"
+  az vm identity assign -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" >/dev/null \
+    || die "could not assign a system-assigned identity to $DROPLET_NAME"
+  local principal vmid
+  principal=$(az vm show -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" --query identity.principalId -o tsv)
+  vmid=$(az vm show -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" --query id -o tsv)
+  [ -n "$principal" ] && [ -n "$vmid" ] || die "could not read the VM's identity/id"
+  if [ -z "$(az role definition list --name devbox-self-deallocator --query '[0].roleName' -o tsv)" ]; then
+    az role definition create --role-definition "{
+      \"Name\": \"devbox-self-deallocator\",
+      \"Description\": \"May deallocate a VM. Nothing else. Used by devbox appliance self-shutdown.\",
+      \"Actions\": [\"Microsoft.Compute/virtualMachines/deallocate/action\"],
+      \"AssignableScopes\": [\"/subscriptions/$SUBSCRIPTION_ID\"]
+    }" >/dev/null || die "could not create the devbox-self-deallocator role definition"
+    log "created custom role devbox-self-deallocator (deallocate action only)"
+  fi
+  if [ -z "$(az role assignment list --assignee "$principal" --role devbox-self-deallocator --scope "$vmid" --query '[0].id' -o tsv 2>/dev/null)" ]; then
+    # A freshly minted principal can 404 in AAD for a minute — retry, don't fail the up.
+    local granted=0 i
+    for i in 1 2 3 4 5; do
+      if az role assignment create --assignee-object-id "$principal" --assignee-principal-type ServicePrincipal \
+           --role devbox-self-deallocator --scope "$vmid" >/dev/null 2>&1; then granted=1; break; fi
+      log "role assignment not accepted yet (AAD propagation) -- retry $i/5 in 15s"
+      sleep 15
+    done
+    [ "$granted" = 1 ] || die "could not grant devbox-self-deallocator to the VM's identity"
+  fi
+}
+
+# Windows: the admin password Azure requires at create is random and discarded — it is
+# never used (no RDP path; SSH is key-only), so it can't be a standing credential. First
+# boot is provision.ps1, run by the guest agent.
+az_create_windows_vm() {
+  need openssl
   local pw; pw=$(openssl rand -base64 24)
   log "creating VM '$DROPLET_NAME' ($SIZE, Windows Server 2022, $REGION) — no RDP rule"
   az vm create -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" \
