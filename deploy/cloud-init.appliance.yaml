@@ -1,0 +1,75 @@
+#cloud-config
+# First-boot setup for a CREDENTIAL-FREE Linux test appliance (Azure / Ubuntu 24.04).
+#
+# This file is a TEMPLATE rendered by the `devbox` CLI (profiles that set
+# CREDENTIAL_FREE=1), which fills in the SSH port and the Node line before upload.
+#
+# It is deliberately much less than the workspace template (cloud-init.yaml): an
+# appliance runs a project's check against a synced copy of a worktree and holds
+# nothing of the operator's. So there is no Claude Code, no gh, no vault, no repo clone
+# and no agent forwarding here -- only what a check needs to run: git, rsync, a C
+# toolchain for native Node modules, and Node LTS with corepack. Docker and the
+# Playwright libraries arrive afterwards with the toolchain layer (os/linux.sh).
+#
+# There is no `users:` block: the provider creates the login user and installs its
+# authorized keys (az vm create --admin-username / --ssh-key-values), with passwordless
+# sudo. Defining the user here as well would replace that definition.
+
+package_update: true
+package_upgrade: true
+packages:
+  - git
+  - curl
+  - ca-certificates
+  - jq
+  - rsync
+  - build-essential
+
+write_files:
+  # SSH hardening drop-in (sshd reads this in addition to the main config).
+  - path: /etc/ssh/sshd_config.d/10-devbox.conf
+    permissions: '0644'
+    content: |
+      Port __SSH_PORT__
+      PasswordAuthentication no
+      PermitRootLogin no
+      PubkeyAuthentication yes
+      AllowAgentForwarding no
+      X11Forwarding no
+  # Ubuntu 24.04 ships SSH as a socket-activated service; the socket's
+  # ListenStream overrides sshd_config's Port. Point the socket at our port too.
+  - path: /etc/systemd/system/ssh.socket.d/10-devbox-port.conf
+    permissions: '0644'
+    content: |
+      [Socket]
+      ListenStream=
+      ListenStream=__SSH_PORT__
+
+runcmd:
+  # --- Node.js (NodeSource) -- the same source the workspace box uses. The line is the
+  #     profile's NODE_MAJOR (a major version, or "lts"), so a check can run on the Node
+  #     it is developed on rather than on whatever LTS is newest the day the box is built.
+  #     corepack is bundled up to Node 24 and not from 25 on, so it is installed from npm
+  #     when missing; enabling it puts the pnpm/yarn shims on PATH, so
+  #     `corepack pnpm ...` needs no global install of either. ---
+  - curl -fsSL https://deb.nodesource.com/setup___NODE_LINE__.x | bash -
+  - apt-get install -y nodejs
+  - command -v corepack >/dev/null || npm install -g corepack
+  - corepack enable
+  # --- Apply the SSH port change, then VERIFY the listener is on the right port before
+  #     signaling ready. A socket-restart failure must not be swallowed: if sshd ends up
+  #     stranded on 22 (firewalled), fail loudly and leave devbox-ready absent so the
+  #     operator's wait loop times out instead of reporting false success. ---
+  - |
+    set -e
+    systemctl daemon-reload
+    systemctl restart ssh.socket
+    systemctl restart ssh
+    for i in $(seq 1 15); do
+      ss -ltn | grep -q ":__SSH_PORT__ " && break
+      sleep 1
+    done
+    ss -ltn | grep -q ":__SSH_PORT__ " || { echo "FATAL: sshd not listening on __SSH_PORT__" >&2; exit 1; }
+    command -v node >/dev/null || { echo "FATAL: node missing -- provisioning incomplete" >&2; exit 1; }
+    command -v corepack >/dev/null || { echo "FATAL: corepack missing -- provisioning incomplete" >&2; exit 1; }
+    touch /var/lib/cloud/devbox-ready

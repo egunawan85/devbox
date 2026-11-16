@@ -6,6 +6,10 @@
 
 # The Linux first-boot template this module renders. SCRIPT_DIR is set by the entrypoint.
 TEMPLATE="$SCRIPT_DIR/cloud-init.yaml"
+# A credential-free box gets the slim template: no Claude Code, gh or vault, and no
+# `users:` block (its provider creates the key-only login user). This module is sourced
+# after the profile conf, so the flag is already set here.
+[ "${CREDENTIAL_FREE:-0}" = 1 ] && TEMPLATE="$SCRIPT_DIR/cloud-init.appliance.yaml"
 
 render_cloud_init() { # -> stdout
   local f keys=""
@@ -17,12 +21,17 @@ render_cloud_init() { # -> stdout
   # Inject the key block at the marker via awk ENVIRON (handles multi-line cleanly,
   # unlike -v; no temp file to leak — L2), then substitute the simple scalars
   # (validated in load_conf, so no sed-injection — L1).
+  # NODE_MAJOR picks the NodeSource line for templates that take one (the appliance's):
+  # a major version, or "lts" for whatever is newest. Interpolated into a URL, so held
+  # to exactly those two shapes.
+  local node_line=${NODE_MAJOR:-lts}
+  case "$node_line" in lts) ;; ''|*[!0-9]*) die "NODE_MAJOR must be a major version number or 'lts', got '$node_line'" ;; esac
   local out
   out=$(KEYS_BLOCK="$keys" awk '
     $0 == "__AUTHORIZED_KEYS_BLOCK__" { printf "%s", ENVIRON["KEYS_BLOCK"]; next }
     { print }
   ' "$TEMPLATE" \
-    | sed -e "s/__DEVBOX_USER__/$DEVBOX_USER/g" -e "s/__SSH_PORT__/$SSH_PORT/g")
+    | sed -e "s/__DEVBOX_USER__/$DEVBOX_USER/g" -e "s/__SSH_PORT__/$SSH_PORT/g" -e "s/__NODE_LINE__/$node_line/g")
   # Guard: a single non-ASCII byte (smart quote, em-dash, NBSP) makes DO's cloud-init
   # datasource reject the ENTIRE user-data as "empty cloud config" -- silently skipping
   # the users block, packages, and runcmd. Fail loudly here instead of shipping a box
@@ -531,14 +540,103 @@ fi
 EOF
 }
 
+# ---- appliance layer (profiles that set CI_DIR — lin-test spec R/L) -----------
+# What a Linux test appliance needs beyond the test prerequisites: the directory synced
+# worktrees land in, owned by the login user, and a check that the tools a run leans on
+# are really there (Node and corepack come from first boot; rsync and git carry the
+# sync). Idempotent; a converged box changes nothing.
+install_appliance_layout() {
+  local host=$1
+  [ -n "${CI_DIR:-}" ] || return 0
+  case "$CI_DIR" in /*) ;; *) die "CI_DIR must be an absolute path on a Linux appliance, got '$CI_DIR'" ;; esac
+  case "$CI_DIR" in *[!a-zA-Z0-9/._-]*|*..*) die "CI_DIR has characters outside [a-zA-Z0-9/._-]: '$CI_DIR'" ;; esac
+  log "ensuring the appliance work area on $host ($CI_DIR)"
+  ssh_box "$host" "CI_DIR='$CI_DIR' bash -s" <<'EOF'
+set -eu
+me=$(id -un)
+sudo install -d -o "$me" -g "$me" -m 0755 "$CI_DIR"
+install -d -m 0755 "$CI_DIR/.lin-test" "$CI_DIR/.lin-test/runs"
+bad=0
+check() { if eval "$2" >/dev/null 2>&1; then echo "  ok    $1"; else echo "  FAIL  $1"; bad=$((bad+1)); fi; }
+check "work area $CI_DIR writable"   "test -w '$CI_DIR/.lin-test/runs'"
+check "node"                         "node --version"
+check "corepack"                     "corepack --version"
+check "git"                          "git --version"
+check "rsync"                        "rsync --version"
+check "jq"                           "jq --version"
+check "flock"                        "command -v flock"
+[ "$bad" -eq 0 ] && echo "verify: all checks passed" || { echo "verify: $bad check(s) failed"; exit 1; }
+EOF
+}
+
+# install_idle_monitor HOST — the appliance's self-deallocation watcher (lin-test spec L).
+# Only for profiles that OPT IN by setting IDLE_MINUTES — a workspace box must never turn
+# itself off. Layers, each re-ensured on every call:
+#   1+2. the VM's managed identity and its deallocate-only role (providers/azure.sh);
+#   3.   the watcher (deploy/azure/idle-monitor.sh), its settings file, and a systemd
+#        timer that runs it every five minutes. Each file is rewritten only when its
+#        content differs, so a script edit or an IDLE_MINUTES change re-applies on the
+#        next `up`/`toolchain` and a converged box is left alone.
+install_idle_monitor() {
+  local host=$1 script="$SCRIPT_DIR/azure/idle-monitor.sh"
+  [ -n "${IDLE_MINUTES:-}" ] || return 0
+  [ "$PROVIDER" = azure ] || die "IDLE_MINUTES is set, but self-deallocation is only implemented for PROVIDER=azure (profile '$DEVBOX_PROFILE' has $PROVIDER)"
+  [ -n "${CI_DIR:-}" ] || die "IDLE_MINUTES is set but CI_DIR is not — the idle monitor reads the runner's lock and heartbeat under CI_DIR"
+  case "$IDLE_MINUTES" in ''|*[!0-9]*) die "IDLE_MINUTES must be a whole number of minutes, got '$IDLE_MINUTES'" ;; esac
+  [ -f "$script" ] || die "missing idle-monitor script: $script"
+  az_ensure_self_deallocator
+  log "installing idle-monitor on $host (deallocates after $IDLE_MINUTES idle minutes; checks every 5)"
+  # The watcher travels on stdin; the remote command is inline so stdin stays free for it.
+  ssh_box "$host" 'sudo install -d -m 0755 /usr/local/lib/devbox /etc/devbox && t=$(mktemp) && cat > "$t" && { sudo cmp -s "$t" /usr/local/lib/devbox/idle-monitor.sh || sudo install -m 0755 "$t" /usr/local/lib/devbox/idle-monitor.sh; }; rm -f "$t"' \
+    < "$script" || die "could not install the idle-monitor script on $host"
+  ssh_box "$host" "IDLE_MINUTES='$IDLE_MINUTES' STATE_DIR='$CI_DIR/.lin-test' bash -s" <<'EOF' || die "could not install the idle-monitor timer on $host"
+set -eu
+put() { # $1 = path, stdin = wanted content; rewrite only when it differs
+  local t; t=$(mktemp); cat > "$t"
+  if sudo cmp -s "$t" "$1"; then rm -f "$t"; return 1; fi
+  sudo install -m 0644 "$t" "$1"; rm -f "$t"; return 0
+}
+changed=0
+put /etc/devbox/idle-monitor.env <<ENV && changed=1
+IDLE_MINUTES=$IDLE_MINUTES
+STATE_DIR=$STATE_DIR
+ENV
+put /etc/systemd/system/devbox-idle-monitor.service <<'UNIT' && changed=1
+[Unit]
+Description=devbox appliance idle monitor (deallocates the VM when no run is active)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/devbox/idle-monitor.sh
+UNIT
+put /etc/systemd/system/devbox-idle-monitor.timer <<'UNIT' && changed=1
+[Unit]
+Description=Run the devbox appliance idle monitor every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+UNIT
+[ "$changed" = 0 ] || sudo systemctl daemon-reload
+sudo systemctl enable --now devbox-idle-monitor.timer >/dev/null 2>&1 || true   # judged by is-active below
+systemctl is-active --quiet devbox-idle-monitor.timer || { echo "idle-monitor: timer is not active" >&2; exit 1; }
+echo "  ok    idle-monitor timer active (IDLE_MINUTES=$IDLE_MINUTES, state $STATE_DIR)"
+EOF
+}
+
 # ---- OS contract (called by lib/common.sh) ---------------------------------
 os_render_firstboot()        { render_cloud_init; }
 os_vault_start()             { vault_start "$1"; }
 os_autoseal_arm()            { autoseal_arm "$1"; }
 os_install_session_secrets() { install_session_secrets "$1"; }
 # Linux's project toolchain layer = the general-purpose test prerequisites (Docker +
-# Playwright Chromium libs + AppArmor grant). Fast no-op once converged, so `up` runs it
-# every time, and `toolchain` re-runs it on its own.
-os_install_toolchain()       { install_test_prereqs "$1"; }
-# The self-deallocation idle-monitor is a Windows-appliance concern (win-test spec L); no-op here.
-os_install_idle_monitor()    { :; }
+# Playwright Chromium libs + AppArmor grant), plus the work area on an appliance. Fast
+# no-op once converged, so `up` runs it every time, and `toolchain` re-runs it on its own.
+os_install_toolchain()       { install_test_prereqs "$1"; install_appliance_layout "$1"; }
+# The self-deallocation idle-monitor: appliance profiles only (IDLE_MINUTES set); a no-op
+# for every workspace.
+os_install_idle_monitor()    { install_idle_monitor "$1"; }

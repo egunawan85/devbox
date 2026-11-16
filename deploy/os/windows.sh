@@ -250,33 +250,7 @@ os_install_idle_monitor() {
   need az; need perl
   [ -f "$script" ] || die "missing idle-monitor script: $script"
 
-  log "ensuring managed identity + deallocate-only role on $DROPLET_NAME"
-  az vm identity assign -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" >/dev/null \
-    || die "could not assign a system-assigned identity to $DROPLET_NAME"
-  local principal vmid
-  principal=$(az vm show -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" --query identity.principalId -o tsv)
-  vmid=$(az vm show -g "$RESOURCE_GROUP" -n "$DROPLET_NAME" --query id -o tsv)
-  [ -n "$principal" ] && [ -n "$vmid" ] || die "could not read the VM's identity/id"
-  if [ -z "$(az role definition list --name devbox-self-deallocator --query '[0].roleName' -o tsv)" ]; then
-    az role definition create --role-definition "{
-      \"Name\": \"devbox-self-deallocator\",
-      \"Description\": \"May deallocate a VM. Nothing else. Used by devbox appliance self-shutdown.\",
-      \"Actions\": [\"Microsoft.Compute/virtualMachines/deallocate/action\"],
-      \"AssignableScopes\": [\"/subscriptions/$SUBSCRIPTION_ID\"]
-    }" >/dev/null || die "could not create the devbox-self-deallocator role definition"
-    log "created custom role devbox-self-deallocator (deallocate action only)"
-  fi
-  if [ -z "$(az role assignment list --assignee "$principal" --role devbox-self-deallocator --scope "$vmid" --query '[0].id' -o tsv 2>/dev/null)" ]; then
-    # A freshly minted principal can 404 in AAD for a minute — retry, don't fail the up.
-    local granted=0 i
-    for i in 1 2 3 4 5; do
-      if az role assignment create --assignee-object-id "$principal" --assignee-principal-type ServicePrincipal \
-           --role devbox-self-deallocator --scope "$vmid" >/dev/null 2>&1; then granted=1; break; fi
-      log "role assignment not accepted yet (AAD propagation) -- retry $i/5 in 15s"
-      sleep 15
-    done
-    [ "$granted" = 1 ] || die "could not grant devbox-self-deallocator to the VM's identity"
-  fi
+  az_ensure_self_deallocator   # layers 1 + 2 — shared with the Linux appliance (providers/azure.sh)
 
   local rendered want have
   rendered=$(mktemp)

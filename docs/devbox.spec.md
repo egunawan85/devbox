@@ -7,7 +7,10 @@ Each requirement is observable — you can check whether a given box satisfies i
 
 ## P — Providers & OS matrix
 
-- **P1** Each OS has one provider: **Linux → DigitalOcean**, **Windows → Azure**.
+- **P1** Each **workspace** OS has one provider: **Linux → DigitalOcean**, **Windows →
+  Azure**. The one exception is not a workspace: the credential-free Linux test appliance
+  runs on **Azure** beside its Windows sibling, so both share a subscription, a region and
+  the self-deallocation mechanism ([lin-test.spec.md](./lin-test.spec.md)).
 - **P2** Linux baseline: **Ubuntu LTS** (current 24.04). Windows baseline: **Windows
   Server LTS** with OpenSSH server. _Defaults; revisit per release._
 - **P3** Size/region are **configurable with defaults** per provider.

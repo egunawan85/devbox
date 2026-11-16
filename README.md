@@ -12,7 +12,7 @@ Or just push the config to a box that already exists.
 | Path | What |
 |---|---|
 | `claude-config/` | The harness payload deployed to the devbox — `CLAUDE.md`, `settings.json`, `hooks/`, and the installers. A self-contained `~/.claude` mirror. |
-| `deploy/` | Provisioning + orchestration (DigitalOcean/Linux, Azure/Windows). |
+| `deploy/` | Provisioning + orchestration (DigitalOcean/Linux, Azure/Windows, Azure/Linux). |
 | `docs/` | Design docs — see below. |
 
 ## Docs
@@ -21,6 +21,14 @@ Or just push the config to a box that already exists.
   mental model.
 - [docs/devbox.spec.md](docs/devbox.spec.md) — the contract a deployed devbox must
   satisfy (**the end state**).
+
+Two **test appliances** hang off the devbox — boxes I call rather than work on, off unless
+a run is happening:
+
+| Appliance | What it runs | Command | Docs |
+|---|---|---|---|
+| `win-test` (Azure / Windows) | Suites that only run on Windows (.NET Framework, LocalDB). | `/win-test` | [overview](docs/win-test.overview.md) · [spec](docs/win-test.spec.md) |
+| `lin-test` (Azure / Ubuntu) | A project's full check, off the shared devbox. Credential-free. | `/lin-test` | [overview](docs/lin-test.overview.md) · [spec](docs/lin-test.spec.md) |
 
 ## Deploy
 

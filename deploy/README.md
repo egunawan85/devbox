@@ -12,7 +12,18 @@ state file** (DigitalOcean itself is the source of truth). Contract:
 | `devbox` | Operator CLI: `up` / `configure` / `ssh` / `status` / `render` / `down`. |
 | `install.sh` | Symlinks `devbox` onto your `PATH` (one-time, so you can run bare `devbox`). |
 | `cloud-init.yaml` | First-boot template: creates the user, hardens SSH, installs the toolchain. |
+| `cloud-init.appliance.yaml` | First-boot template for a credential-free Linux appliance (`CREDENTIAL_FREE=1`): SSH hardening, git, rsync, Node + corepack — no Claude Code, gh or vault. |
+| `azure/idle-monitor.sh` | The Linux appliance's self-deallocation watcher (the Windows one is `azure/idle-monitor.ps1`). |
 | `targets/*.conf.example` | Per-profile config templates — copy to `targets/<profile>.conf` (gitignored) and edit. |
+
+## Profiles
+
+| Profile | Provider / OS | Role | Driven by |
+|---|---|---|---|
+| `default` | DigitalOcean / Ubuntu | Workspace: the Linux devbox. | `devbox ssh` |
+| `rg` | Azure / Windows Server | Workspace: a Windows devbox with the .NET build stack. | `devbox -p rg ssh` |
+| `win-test` | Azure / Windows Server | Test appliance for Windows-only suites; off unless a run is happening. | `/win-test` |
+| `lin-test` | Azure / Ubuntu | Credential-free test appliance for a project's full check; off unless a run is happening. | `/lin-test` |
 
 ## One-time setup
 
@@ -154,6 +165,42 @@ re-derived from the private half). Spec: `docs/devbox.spec.md` A6.
 them, nothing automates them): `az login` (or `doctl auth init`; the `az` *binary* is
 auto-installed on Linux boxes, the *login* is yours), setting `SUBSCRIPTION_ID`, and
 editing `targets/<profile>.conf`.
+
+## Linux test appliance (the `lin-test` profile)
+
+A second Linux box that exists to run a project's full check off the shared devbox, and
+is deallocated unless a run is happening. Why: [../docs/lin-test.overview.md](../docs/lin-test.overview.md);
+contract: [../docs/lin-test.spec.md](../docs/lin-test.spec.md).
+
+```sh
+cp deploy/targets/lin-test.conf.example deploy/targets/lin-test.conf   # set SUBSCRIPTION_ID
+devbox -p lin-test doctor     # machine key + az login
+devbox -p lin-test up         # RG + NSG + VM, first boot, test prerequisites, idle monitor
+devbox -p lin-test down       # deletes the resource group; nothing billable is left
+```
+
+Run these **on the Linux devbox**: the appliance authorizes the key of the machine that
+ran `up`, and `up` writes `~/.config/devbox/lin-test/runner.env` there for `/lin-test`.
+
+What `up` does differently for this profile, because it sets `CREDENTIAL_FREE=1`:
+
+- **First boot is `cloud-init.appliance.yaml`**, handed to `az vm create` as custom data.
+  The login user is created key-only by Azure from `SSH_PUBKEY_FILES` — there is no
+  password on the VM — and cloud-init moves sshd to `SSH_PORT`, the only port the NSG
+  admits. `NODE_MAJOR` picks the Node line; keep it on the devbox's.
+- **No `configure` payload**: no clone of this repo, no Claude config, no forwarded agent
+  (`devbox -p lin-test ssh` does not forward one either), no session secrets.
+- **No vault**: `up` skips it and `devbox -p lin-test vault …` refuses.
+- **Toolchain** = the test prerequisites below, plus the work area `CI_DIR` (default
+  `/srv/ci`) and a check that node, corepack, git, rsync, jq and flock are present.
+- **Idle monitor** (because `IDLE_MINUTES` is set): the VM gets a system-assigned
+  identity holding one action — deallocate — on itself, and a systemd timer that uses it
+  when no run holds the lock and the box has been idle that long. `systemctl list-timers
+  devbox-idle-monitor.timer` and `/var/log/devbox-idle-monitor.log` on the box show it
+  working.
+
+`OS_DISK_GB` / `OS_DISK_SKU` size the OS disk, which is the only thing that persists
+between runs and is billed while the box is off.
 
 ## Test prerequisites — Docker + Playwright (Linux)
 
