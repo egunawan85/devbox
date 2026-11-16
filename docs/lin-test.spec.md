@@ -50,7 +50,9 @@ Each requirement is observable — you can check whether a given setup satisfies
   deallocates the box when **no run is active AND** it has been idle longer than
   `IDLE_MINUTES` (default 10). *Active* = the run lock (§C1) is held. *Idle* is measured
   from the newer of the heartbeat (§C2) and the boot time, so a box that was just started
-  has a full window before its first heartbeat.
+  has a full window before its first heartbeat. The monitor keeps the lock from its
+  decision until its deallocate call and stands down if the heartbeat moved meanwhile, so
+  a run arriving in that moment is not started on a box that is about to go.
 - **L4** The idle monitor is also the **crash-safety net**. The lock is a kernel `flock`,
   released when its holder dies however it dies, so a killed run cannot pin the box; and a
   dead run's heartbeat goes stale. There is no path that leaves the box running
@@ -67,8 +69,13 @@ Each requirement is observable — you can check whether a given setup satisfies
 
 - **S1** A worktree is synced to **`$CI_DIR/<repo>/<branch>`** (default `/srv/ci`), one
   folder per branch per repository, by **rsync over SSH**. `<repo>` is the name of the
-  repository's main checkout, the same for every linked worktree; both names are reduced to
-  `[A-Za-z0-9._-]`.
+  repository's main checkout plus a short hash of its path — the same for every linked
+  worktree, different for two repositories that share a folder name. Both names are
+  reduced to `[A-Za-z0-9._-]`; a branch name that had to be changed carries a short hash
+  of the original, so `feat/x` and `feat-x` never share a folder. A checkout at a bare
+  commit is `detached-<commit>`.
+- **S1a** The sync compares **content**, not size and time, so an edit can never be
+  skipped; and it is time-limited to finish before the box stops waiting for it (§C3).
 - **S2** What is synced is **what git knows about** in the worktree: tracked files plus
   untracked files that are not ignored (`git ls-files --cached --others
   --exclude-standard`). Ignored files — `node_modules`, build output, `tmp/`, `.env` —
@@ -78,7 +85,9 @@ Each requirement is observable — you can check whether a given setup satisfies
   work), so the sync is from the working tree, not a git fetch.
 - **S4** The branch folder is **kept between runs**, so installs and builds are warm. The
   sync only adds and updates; a file deleted from the worktree is removed on the box by
-  comparing this sync's file list with the previous one for that branch. `--clean` wipes
+  comparing this sync's file list with the previous one for that branch. The list is sent
+  before the files, and a sync that is given up on partway is added to the branch's
+  record, so files it did deliver are still reconciled by the next run. `--clean` wipes
   the folder first.
 - **S5** The folder holds a **stand-in git repository**: one snapshot commit of what is
   there, re-made each run, with no history, no remote and no credentials — so a check
@@ -102,8 +111,11 @@ Each requirement is observable — you can check whether a given setup satisfies
 - **C3** Lock acquisition **times out** (default 60 min) rather than hanging forever, and a
   run whose sync never arrives gives the lock back after 15 min: a stuck or vanished peer
   surfaces as an error (exit 75), never as an endless wait.
-- **C4** Nothing the command leaves running can hold the lock: it is started with the
-  lock's descriptor closed.
+- **C4** Nothing the command leaves running can hold the lock or outlive its turn: it is
+  started with the lock's descriptor closed, whatever is still running in its process
+  group when it exits is stopped before the lock is given up, and if the runner itself is
+  killed outright its command is stopped within seconds and its heartbeat ends. Docker
+  containers are the daemon's, not the command's, and are left as the project left them.
 - **C5** There is **one box, shared** by every session. If throughput ever matters, the
   remedy is a second appliance, not parallel runs on this one.
 
@@ -132,8 +144,9 @@ Each requirement is observable — you can check whether a given setup satisfies
   atomically and once. The run is detached on the box and outlives a dropped connection;
   the live output stream is a convenience and may drop without affecting the verdict.
 - **X7** The orchestrator **never blocks indefinitely**: every poll is itself
-  time-limited, a box that stops answering for two minutes is reported as lost contact,
-  and past the command's limit plus a margin it exits 124 with diagnostics. A caller that
+  time-limited, a box that stops answering for two minutes on the clock — while queued or
+  while running — is reported as lost contact, and past the command's limit plus a margin
+  it exits 124 with diagnostics. A caller that
   leaves without a verdict tells the box to abandon the run.
 - **X8** The run's **log and verdict are fetched** into the tested worktree's
   `tmp/lin-test/<run id>/` (`tmp/lin-test/latest` points at the newest) — not the caller's
@@ -165,7 +178,10 @@ Each requirement is observable — you can check whether a given setup satisfies
   absent the runner **fails with a clear "stand up the appliance first"** message.
 - **I4** The runner reaches the box by SSH **from inside its script**, with the devbox's
   machine key, never a forwarded agent. The devbox's guard against ad-hoc SSH is
-  unchanged: an agent still cannot compose a connection to the box itself.
+  unchanged: an agent still cannot compose a connection to the box itself. The host the
+  script connects to comes only from a `runner.env` under `~/.config/devbox/`, and its
+  host, port and user are checked before use — the script cannot be pointed at a
+  destination of the caller's choosing.
 - **I5** Policy lives where it's loaded on demand: the **rule** in global CLAUDE.md (a
   project's full check, when the devbox is busy → `/lin-test`), the **procedure** in the
   command + scripts + this doc, the **what-the-check-is** in each project's own repo (§X2).
