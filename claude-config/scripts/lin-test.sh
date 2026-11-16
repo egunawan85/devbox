@@ -196,8 +196,19 @@ fi
 # --- 2. wait for SSH; the first contact marks the box busy ----------------------
 echo "lin-test: waiting for ssh $REMOTE:$SSH_PORT…"
 ready=0
-for _ in $(seq 1 60); do
+for i in $(seq 1 60); do
   if "${SSH[@]}" "mkdir -p '$STATE_DIR/runs' && touch '$STATE_DIR/last-activity'" </dev/null >/dev/null 2>&1; then ready=1; break; fi
+  # A box that was "running" a moment ago may have been on its way off: its idle monitor
+  # can deallocate it between the check above and this connection. Start it again
+  # rather than wait out a box that is no longer there.
+  if [ $(( i % 6 )) = 0 ]; then
+    state=$(power_state)
+    if [ "$state" = "PowerState/deallocated" ] || [ "$state" = "PowerState/stopped" ]; then
+      echo "lin-test: $VM_NAME turned itself off meanwhile; starting it again…"
+      az vm start "${AZ_SUB[@]}" -g "$RESOURCE_GROUP" -n "$VM_NAME" >/dev/null || die "az vm start failed"
+      COLD=1
+    fi
+  fi
   sleep 5
 done
 [ "$ready" = 1 ] || die "ssh never came up (box started but unreachable)"

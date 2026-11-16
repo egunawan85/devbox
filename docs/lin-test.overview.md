@@ -47,6 +47,17 @@ counts, and the full log is in `./tmp/lin-test/`. If another session's check is 
 on the box, mine waits its turn and says so. Ten idle minutes later the box turns
 itself off.
 
+Measured on the appliance in November 2026, with anvil's check (about 1,290 tests):
+
+| | |
+|---|---|
+| Wake from deallocated to the first SSH answer | 35 s |
+| The check, branch folder warm | about 4 min 40 s |
+| The check, first run of a branch (cold install, database image pull) | about 5 min 20 s |
+| A second run asked for at the same moment | its own run plus the first one's |
+| Idle to deallocated | 10 to 15 min (ten idle minutes, checked every five) |
+| `devbox -p lin-test up` from nothing | under 5 min |
+
 ## Key choices
 
 - **Appliance, not workspace — and credential-free.** lin-test holds the *engine* (Node,
@@ -103,3 +114,6 @@ and its extra local disk is of no use to a box that deallocates between runs.
   suites cannot run without one; nothing here needs it yet, and not having it is what
   makes "credential-free" a property of the box rather than a habit.
 - Suites that need real git history or a remote: the box's copy has neither.
+- Pruning Docker images. The box prunes its own branch folders, not what a check pulls;
+  with one small database image that is nothing, and `down` + `up` is the reset if it
+  ever is something.
