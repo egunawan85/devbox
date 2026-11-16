@@ -80,5 +80,12 @@ Two things about what the box has, which can make a check behave differently the
   snapshot commit, so `git ls-files` works, but a check that reads real history or a
   remote will fail there. Report that too.
 
+- **Nothing built by hand.** The box has only what the command makes. Tests that run
+  only when something was built beforehand on the machine — a local Docker image, a
+  downloaded browser — are *skipped* there, not failed. So compare the **skipped** count
+  with a devbox run, and when it is higher say which tests were skipped and why; the
+  remedy is for the project's `LIN_TEST_CMD` to build what its check needs (for anvil:
+  `infra/workspace-image.sh && infra/gateway-image.sh` before the check).
+
 **Never** report a check as passed without a run whose `rc=0` you actually saw. If you
 couldn't run it, say exactly that and why.

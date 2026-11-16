@@ -128,6 +128,11 @@ Each requirement is observable — you can check whether a given setup satisfies
   committed `scripts/lin-test.env`; else, for a `package.json` that pins pnpm and has a
   `check` script, `corepack pnpm install --frozen-lockfile && corepack pnpm check`.
   Otherwise the run is **refused** — it never guesses.
+- **X2a** The box has **only what the command makes**. A check whose tests run only when
+  something was built on the machine beforehand (a local Docker image, a downloaded
+  browser) will skip those tests there — the same total, fewer executed. A project that
+  wants them run names the build in its `LIN_TEST_CMD`; the skipped count in §X9 is how
+  the difference shows.
 - **X3** **Nothing secret goes to the appliance.** There is no credential-forwarding
   channel. If a check needs a secret to pass, that is a finding to report.
 - **X4** The runner's **exit code is the command's** (0 iff it exited 0). Codes that are
