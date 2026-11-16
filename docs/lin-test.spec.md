@@ -188,7 +188,8 @@ Each requirement is observable — you can check whether a given setup satisfies
   host, port and user are checked before use — the script cannot be pointed at a
   destination of the caller's choosing.
 - **I5** Policy lives where it's loaded on demand: the **rule** in global CLAUDE.md (a
-  project's full check, when the devbox is busy → `/lin-test`), the **procedure** in the
+  full check runs on the devbox one at a time, through a lock; when the lock is taken →
+  `/lin-test`), the **procedure** in the
   command + scripts + this doc, the **what-the-check-is** in each project's own repo (§X2).
 
 ## Verification
