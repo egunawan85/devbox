@@ -44,19 +44,24 @@ hb="$STATE_DIR/last-activity"
 
 # 1. Active run? A non-blocking attempt on the same lock the runner takes: it fails
 #    exactly while a run holds it. (A queued run is waiting on a holder, so a queue
-#    always reads as active too.)
-if [ -e "$lock" ] && ! flock -n "$lock" true; then
-  log "run active (lock held) -- staying up"
-  exit 0
+#    always reads as active too.) Once taken, the lock is KEPT until this script ends,
+#    so no run can start between the decision below and the deallocate call. Opened
+#    read-only, and only if the runner has already made it: this script is root, and a
+#    root-owned lock file would shut the runner out.
+if [ -e "$lock" ]; then
+  exec 8<"$lock"
+  if ! flock -n 8; then
+    log "run active (lock held) -- staying up"
+    exit 0
+  fi
 fi
+heartbeat_time() { stat -c %Y "$hb" 2>/dev/null || echo 0; }
 
 # 2. Idle long enough?
 now="${IDLE_MONITOR_NOW:-$(date +%s)}"
 since="${IDLE_MONITOR_BOOT:-$(awk '/^btime /{print $2}' /proc/stat)}"
-if [ -e "$hb" ]; then
-  hbt=$(stat -c %Y "$hb" 2>/dev/null || echo 0)
-  [ "$hbt" -gt "$since" ] && since=$hbt
-fi
+hbt=$(heartbeat_time)
+[ "$hbt" -gt "$since" ] && since=$hbt
 idle_s=$(( now - since ))
 if [ "$idle_s" -lt $(( IDLE_MINUTES * 60 )) ]; then
   log "idle $(( idle_s / 60 )) min < $IDLE_MINUTES -- staying up"
@@ -78,6 +83,12 @@ sub=$(printf '%s' "$md" | jq -r .subscriptionId)
 rg=$(printf '%s' "$md" | jq -r .resourceGroupName)
 vm=$(printf '%s' "$md" | jq -r .name)
 uri="https://management.azure.com/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.Compute/virtualMachines/$vm/deallocate?api-version=2024-07-01"
+# A caller's first contact touches the heartbeat before it asks for the lock. If one
+# arrived while the token was being fetched, the box is no longer idle: stand down.
+if [ "$(heartbeat_time)" -gt "$hbt" ]; then
+  log "a run arrived while preparing to deallocate -- staying up"
+  exit 0
+fi
 # The token goes to curl on stdin (a config file), never on its command line.
 if printf 'header = "Authorization: Bearer %s"\n' "$tok" \
      | curl -fsS --max-time 30 -X POST -H 'Content-Length: 0' -K - "$uri" >/dev/null; then

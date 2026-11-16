@@ -108,7 +108,38 @@ run_to_end r-leak proj main a.txt
 check "a process the command leaves behind does not hold the lock" 'flock -n "$CI/.lin-test/run.lock" true'
 pkill -f "sleep 20" 2>/dev/null
 
+# The same, but left in the command's own process group: it is stopped before the lock is
+# given up, so the next run cannot meet it on a port.
+new_run r-stray proj main 'sleep 471 & echo left one in the group'
+run_to_end r-stray proj main a.txt
+check "a process left in the command's group is stopped" '[ "$(rc_of r-stray)" = 0 ] && ! pgrep -f "sleep 471" >/dev/null'
+
+# The runner killed outright: no trap runs. Its heartbeat must stop and its command too.
+new_run r-kill9 proj main 'sleep 472'
+bash "$RUNNER" "$CI" r-kill9 >/dev/null 2>&1 &
+kpid=$!
+wait_state r-kill9 locked; sync_files r-kill9 proj main a.txt; wait_state r-kill9 running
+sleep 1; kill -9 "$kpid"; wait "$kpid" 2>/dev/null
+# (Within seconds, not at once: a `sleep` the runner was waiting on holds the descriptor
+# until it returns.)
+check "a killed runner frees the lock within seconds"  'flock -w 5 "$CI/.lin-test/run.lock" true'
+for _ in $(seq 1 200); do pgrep -f "sleep 472" >/dev/null || break; sleep 0.1; done
+check "its command is stopped, not left running without the lock" '! pgrep -f "sleep 472" >/dev/null'
+sleep 6; touch -d '1 hour ago' "$CI/.lin-test/last-activity"; sleep 7
+check "its heartbeat stops, so the box can go idle"    '[ $(( $(date +%s) - $(stat -c %Y "$CI/.lin-test/last-activity") )) -gt 3000 ]'
+
 echo "sync hand-off"
+
+# A sync given up on partway: the files it did send are remembered, so the next run
+# removes one that has since left the worktree.
+new_run r-part1 proj part 'true'
+bash "$RUNNER" "$CI" r-part1 >/dev/null 2>&1 &
+wait_state r-part1 locked
+mkdir -p "$CI/proj/part"; echo x > "$CI/proj/part/half.txt"; printf 'half.txt\0' > "$CI/.lin-test/runs/r-part1/manifest"
+touch "$CI/.lin-test/runs/r-part1/abort"; wait_state r-part1 done 30; wait
+new_run r-part2 proj part 'true'
+run_to_end r-part2 proj part keep.txt
+check "files from an abandoned sync are reconciled by the next run" '[ ! -e "$CI/proj/part/half.txt" ] && [ -f "$CI/proj/part/keep.txt" ]'
 
 new_run r-del1 proj feat 'true'
 run_to_end r-del1 proj feat keep.txt sub/gone.txt
@@ -169,16 +200,22 @@ check "a lock that never frees is rc 75 with a reason" '[ "$(rc_of r-held)" = 75
 
 echo "pruning"
 
-mkdir -p "$CI/proj/gone-branch" "$CI/proj/stale" "$CI/other/main" "$CI/.lin-test/used"
-touch "$CI/.lin-test/used/proj--gone-branch" "$CI/.lin-test/used/other--main"
-touch -d '30 days ago' "$CI/.lin-test/used/proj--stale"
+mkdir -p "$CI/proj/gone-branch" "$CI/proj/stale" "$CI/other/main" "$CI/.lin-test/used/proj" "$CI/.lin-test/used/other"
+touch "$CI/.lin-test/used/proj/gone-branch" "$CI/.lin-test/used/other/main"
+touch -d '30 days ago' "$CI/.lin-test/used/proj/stale"
 new_run r-gc proj main 'true'
-printf 'main\nstale\nfeat\ngitb\nq1\nq2\n' > "$CI/.lin-test/runs/r-gc/branches"
+printf 'main\nstale\nfeat\ngitb\nq1\nq2\npart\n' > "$CI/.lin-test/runs/r-gc/branches"
 run_to_end r-gc proj main a.txt
 check "a folder whose branch is gone is pruned"        '[ ! -e "$CI/proj/gone-branch" ]'
 check "a folder unused past the retention is pruned"   '[ ! -e "$CI/proj/stale" ]'
 check "this run's own folder is kept"                  '[ -d "$CI/proj/main" ]'
 check "another repo's folders are judged by age only"  '[ -d "$CI/other/main" ]'
+
+# Short of disk with nothing left to evict but this run's own folder: the run must still
+# end with its verdict rather than circle looking for space.
+new_run r-full proj main 'echo ran' MIN_FREE_GB=99999999
+run_to_end r-full proj main a.txt
+check "a disk that cannot be freed does not hang the run" '[ "$(rc_of r-full)" = 0 ] && [ -d "$CI/proj/main" ]' "rc=$(rc_of r-full)"
 
 echo "parameters"
 
@@ -213,7 +250,10 @@ resolve() { ( cd "$fx" && bash "$ORCH" --resolve-only "$@" 2>&1 ); }
 check "a project that says nothing is refused"         '! resolve >/dev/null' "$(resolve | head -1)"
 printf '{"packageManager":"pnpm@11.25.0","scripts":{"check":"tsc"}}\n' > "$fx/package.json"
 check "a pnpm project with a check script gets the default" '[[ "$(resolve)" == *"command:  corepack pnpm install --frozen-lockfile && corepack pnpm check"* ]]' "$(resolve | grep command)"
-check "the branch becomes a plain folder name"         '[[ "$(resolve)" == *"branch:   some-branch"* ]]' "$(resolve | grep branch)"
+check "the branch becomes a plain folder name"         '[[ "$(resolve)" =~ branch:\ \ \ some-branch-[0-9a-f]{8} ]]' "$(resolve | grep branch)"
+git -C "$fx" symbolic-ref HEAD refs/heads/some-branch
+check "a branch whose name already is one keeps it"    '[[ "$(resolve)" == *"branch:   some-branch"$'"'"'\n'"'"'* ]]' "$(resolve | grep branch)"
+check "so two branches never share a folder"           '[ "$(git -C "$fx" symbolic-ref HEAD refs/heads/some/branch; resolve | grep branch)" != "$(git -C "$fx" symbolic-ref HEAD refs/heads/some-branch; resolve | grep branch)" ]'
 mkdir -p "$fx/scripts"; printf '# the full check\nLIN_TEST_CMD=make check && make lint\nLIN_TEST_TIMEOUT=900\n' > "$fx/scripts/lin-test.env"
 check "scripts/lin-test.env wins over the default"     '[[ "$(resolve)" == *"command:  make check && make lint"* ]] && [[ "$(resolve)" == *"timeout:  900s"* ]]' "$(resolve | grep -E "command|timeout")"
 check "a command after -- wins over both"              '[[ "$(resolve -- npm test -- --run)" == *"command:  npm test -- --run"* ]]' "$(resolve -- npm test -- --run | grep command)"

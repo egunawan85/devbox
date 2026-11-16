@@ -66,8 +66,16 @@ finish() { # $1 = exit code, $2 = error text (empty when the command itself gave
 # while the command runs — so the idle monitor never measures a busy box as idle. Started
 # BEFORE the lock is opened, so the loop does not inherit the lock's descriptor and
 # cannot hold the lock past this script's death.
+# It also ends by itself within seconds of this script dying — however it dies, a kill -9
+# included, where no trap runs — so a dead run's heartbeat goes stale and the idle
+# monitor is never held off by a loop that outlived its run.
+RUNNER_PID=$$
 touch "$HEARTBEAT"
-( while :; do touch "$HEARTBEAT" 2>/dev/null; sleep 30; done ) &
+( n=0
+  while kill -0 "$RUNNER_PID" 2>/dev/null; do
+    [ $(( n % 6 )) = 0 ] && touch "$HEARTBEAT" 2>/dev/null
+    n=$((n + 1)); sleep 5
+  done ) &
 HB_PID=$!
 CMD_PID=""
 # Stop the command's whole process group: TERM, then KILL. The process itself is
@@ -85,7 +93,12 @@ stop_command() {
   kill -KILL -- "-$CMD_PID" 2>/dev/null; kill -KILL "$CMD_PID" 2>/dev/null
   return 0
 }
-cleanup() { kill "$HB_PID" 2>/dev/null || true; touch "$HEARTBEAT" 2>/dev/null || true; }
+GUARD_PID=""
+cleanup() { kill "$HB_PID" $GUARD_PID 2>/dev/null || true; touch "$HEARTBEAT" 2>/dev/null || true; }
+# rm that also gets past files a container wrote as root (a bind-mounted folder is the
+# usual source). The login user has passwordless sudo; every path given here is built
+# from names already held to a strict character set.
+remove_tree() { rm -rf -- "$1" 2>/dev/null; [ ! -e "$1" ] || sudo -n rm -rf -- "$1" 2>/dev/null; [ ! -e "$1" ]; }
 trap cleanup EXIT
 trap 'say "stopped by a signal"; stop_command; finish 143 "the runner was stopped by a signal" ""; exit 143' TERM INT HUP
 
@@ -112,7 +125,17 @@ for n in "$RUN_TIMEOUT" "$LOCK_TIMEOUT" "$SYNC_TIMEOUT" "$RETAIN_DAYS" "$MIN_FRE
 done
 [ -s "$RUNDIR/command" ] || { finish 2 "no command was given to run" ""; exit 2; }
 DEST="$CI_DIR/$REPO/$BRANCH"
-KEY="$REPO--$BRANCH"
+# Per-branch records live at <kind>/<repo>/<branch>: a path, so no pair of names can be
+# mistaken for another pair the way a joined "repo--branch" key could.
+KEY="$REPO/$BRANCH"
+mkdir -p "$STATE/manifests/$REPO" "$STATE/used/$REPO"
+# A sync that started and was then given up on has still put files in the folder. Its
+# file list is added to the branch's record, so the next run's comparison knows about
+# them and removes any the worktree no longer has.
+remember_partial_sync() {
+  [ -s "$RUNDIR/manifest" ] || return 0
+  cat "$RUNDIR/manifest" >>"$STATE/manifests/$KEY" 2>/dev/null || true
+}
 
 # ---- 1. the box-wide lock ------------------------------------------------------
 # flock(2): the kernel releases it when this process dies, however it dies, so a killed
@@ -131,15 +154,16 @@ fi
 # ---- 2. make room for the sync, then wait for it -------------------------------
 if [ "$CLEAN" = 1 ] && [ -d "$DEST" ]; then
   say "--clean: removing $DEST"
-  rm -rf -- "$DEST" 2>>"$LOG" || true
+  remove_tree "$DEST" || { finish 2 "--clean could not remove $DEST" ""; exit 2; }
   rm -f -- "$STATE/manifests/$KEY"
 fi
 mkdir -p "$DEST" || { finish 2 "could not create $DEST" ""; exit 2; }
 set_state locked
 waited=0
 until [ -e "$RUNDIR/synced" ]; do
-  if [ -e "$RUNDIR/abort" ]; then finish 130 "the run was abandoned during the sync" ""; exit 130; fi
+  if [ -e "$RUNDIR/abort" ]; then remember_partial_sync; finish 130 "the run was abandoned during the sync" ""; exit 130; fi
   if [ "$waited" -ge "$SYNC_TIMEOUT" ]; then
+    remember_partial_sync
     finish 75 "the worktree never arrived: no sync completed within ${SYNC_TIMEOUT}s" ""; exit 75
   fi
   sleep 1; waited=$((waited + 1))
@@ -168,17 +192,19 @@ fi
 # So the folder gets a stand-in repository: one snapshot commit of exactly what is here,
 # re-made each run. It has no history, no remote and no credentials; a check that needs
 # real history will fail here, and that is a finding to report, not something to fake.
+# (Lock descriptor closed and automatic gc off: git must not leave a background process
+# holding the box's lock after this run.)
 (
   cd "$DEST" || exit 1
   [ -d .git ] || git init -q . || exit 1
-  g() { git -c user.name=lin-test -c user.email=lin-test@invalid -c core.hooksPath=/dev/null -c commit.gpgsign=false "$@"; }
+  g() { git -c user.name=lin-test -c user.email=lin-test@invalid -c core.hooksPath=/dev/null -c commit.gpgsign=false -c gc.auto=0 -c maintenance.auto=false "$@"; }
   g add -A || exit 1
   if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
     g commit -q --amend --allow-empty --no-verify -m "lin-test snapshot"
   else
     g commit -q --allow-empty --no-verify -m "lin-test snapshot"
   fi
-) >>"$LOG" 2>&1 || say "WARNING: could not make the stand-in git repository; a check that calls git will fail"
+) 9>&- >>"$LOG" 2>&1 || say "WARNING: could not make the stand-in git repository; a check that calls git will fail"
 touch "$STATE/used/$KEY"
 
 # ---- 4. run the command --------------------------------------------------------
@@ -189,6 +215,12 @@ set_state running
 say "running in $DEST (limit ${RUN_TIMEOUT}s): $(tr '\n' ' ' <"$RUNDIR/command")"
 ( cd "$DEST" && exec setsid bash "$RUNDIR/command" ) 9>&- </dev/null >>"$LOG" 2>&1 &
 CMD_PID=$!
+# If this script is killed outright (no trap runs), the command must not carry on
+# without the lock that died with it: a watcher that outlives this script stops it.
+( while kill -0 "$RUNNER_PID" 2>/dev/null; do sleep 2; done
+  kill -TERM -- "-$CMD_PID" 2>/dev/null; kill -TERM "$CMD_PID" 2>/dev/null; sleep 10
+  kill -KILL -- "-$CMD_PID" 2>/dev/null; kill -KILL "$CMD_PID" 2>/dev/null ) 9>&- >/dev/null 2>&1 &
+GUARD_PID=$!
 cmd_start=$(date +%s); rc=""; err=""
 while kill -0 "$CMD_PID" 2>/dev/null; do
   if [ -e "$RUNDIR/abort" ]; then
@@ -202,6 +234,15 @@ while kill -0 "$CMD_PID" 2>/dev/null; do
   sleep 2
 done
 if [ -z "$rc" ]; then wait "$CMD_PID"; rc=$?; else wait "$CMD_PID" 2>/dev/null; fi
+# Whatever the command left running in its process group goes with it, before the lock
+# is given up: the next run must not meet this one's stray processes on the same ports.
+# (Containers belong to the Docker daemon, not to this group, and are left as the
+# project left them — as they would be on the devbox.)
+if kill -0 -- "-$CMD_PID" 2>/dev/null; then
+  say "stopping processes the command left running"
+  stop_command
+fi
+kill "$GUARD_PID" 2>/dev/null; GUARD_PID=""
 CMD_PID=""
 say "command exited $rc after $(( $(date +%s) - cmd_start ))s"
 
@@ -235,28 +276,37 @@ say "$summary"
 gc() {
   local d repo branch key stamp now cutoff free
   now=$(date +%s); cutoff=$(( now - RETAIN_DAYS * 86400 ))
-  drop() { say "pruning $1 ($2)"; rm -rf -- "$1" 2>/dev/null; rm -f -- "$STATE/manifests/$3" "$STATE/used/$3"; rmdir -- "$(dirname -- "$1")" 2>/dev/null; }
+  # A folder that will not go keeps its records, and reports failure so the free-space
+  # loop below stops rather than choosing it again for ever.
+  drop() {
+    say "pruning $1 ($2)"
+    remove_tree "$1" || { say "could not remove $1"; return 1; }
+    rm -f -- "$STATE/manifests/$3" "$STATE/used/$3"; rmdir -- "$(dirname -- "$1")" 2>/dev/null
+    return 0
+  }
   for d in "$CI_DIR"/*/*/; do
     [ -d "$d" ] || continue
-    d=${d%/}; branch=${d##*/}; repo=${d%/*}; repo=${repo##*/}; key="$repo--$branch"
+    d=${d%/}; branch=${d##*/}; repo=${d%/*}; repo=${repo##*/}; key="$repo/$branch"
     [ "$d" = "$DEST" ] && continue
     stamp=$(stat -c %Y "$STATE/used/$key" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || echo "$now")
-    if [ "$stamp" -lt "$cutoff" ]; then drop "$d" "unused for more than $RETAIN_DAYS days" "$key"; continue; fi
+    if [ "$stamp" -lt "$cutoff" ]; then drop "$d" "unused for more than $RETAIN_DAYS days" "$key" || true; continue; fi
     if [ "$repo" = "$REPO" ] && [ -s "$RUNDIR/branches" ] && ! grep -qxF -- "$branch" "$RUNDIR/branches"; then
-      drop "$d" "its branch no longer exists" "$key"
+      drop "$d" "its branch no longer exists" "$key" || true
     fi
   done
-  while :; do
+  local tries=0
+  while [ "$tries" -lt 50 ]; do
+    tries=$((tries + 1))
     free=$(df -BG --output=avail "$CI_DIR" 2>/dev/null | tail -n 1 | tr -dc '0-9')
     [ -n "$free" ] && [ "$free" -lt "$MIN_FREE_GB" ] || break
     d=$(for x in "$CI_DIR"/*/*/; do
           [ -d "$x" ] || continue; x=${x%/}; [ "$x" = "$DEST" ] && continue
           b=${x##*/}; r=${x%/*}; r=${r##*/}
-          printf '%s %s\n' "$(stat -c %Y "$STATE/used/$r--$b" 2>/dev/null || echo 0)" "$x"
+          printf '%s %s\n' "$(stat -c %Y "$STATE/used/$r/$b" 2>/dev/null || echo 0)" "$x"
         done | sort -n | head -n 1 | cut -d' ' -f2-)
     [ -n "$d" ] || break
     b=${d##*/}; r=${d%/*}; r=${r##*/}
-    drop "$d" "free disk ${free}G is under ${MIN_FREE_GB}G" "$r--$b"
+    drop "$d" "free disk ${free}G is under ${MIN_FREE_GB}G" "$r/$b" || break
   done
   # Old run records (logs and verdicts) go with the same retention.
   find "$STATE/runs" -mindepth 1 -maxdepth 1 -type d -mtime "+$RETAIN_DAYS" ! -name "$RUN_ID" -exec rm -rf {} + 2>/dev/null

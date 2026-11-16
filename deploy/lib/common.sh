@@ -107,7 +107,10 @@ load_conf() {
 # on first use, then refuses a changed key thereafter.
 ssh_box() {
   local ip=$1; shift
-  ssh -p "$SSH_PORT" \
+  # -a: "non-forwarded" must not depend on the operator's own ssh config (a ForwardAgent
+  # yes under Host * would otherwise hand the agent to every box this reaches, a
+  # credential-free appliance included).
+  ssh -a -p "$SSH_PORT" \
       -o StrictHostKeyChecking=accept-new \
       -o ConnectTimeout=10 \
       "$DEVBOX_USER@$ip" "$@"

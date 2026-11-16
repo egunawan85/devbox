@@ -82,15 +82,25 @@ WORKTREE=$(cd "$WORKTREE" && git rev-parse --show-toplevel 2>/dev/null) || die "
 
 # Names become path segments on the box, so they are reduced to a strict character set
 # here and checked again there.
-safe_name() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^[.-]*//'; }
+# A name that had to be changed gets a short hash of the original appended, so two
+# different branches ("feat/x" and "feat-x") never share a folder.
+safe_name() {
+  local s; s=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^[.-]*//')
+  if [ "$s" != "$1" ]; then s="${s:-x}-$(printf '%s' "$1" | sha256sum | cut -c1-8)"; fi
+  printf '%s' "$s"
+}
+# A checkout with no branch is named for its commit.
+detached_name() { printf 'detached-%s' "$(git -C "$1" rev-parse --short HEAD 2>/dev/null)"; }
 # symbolic-ref, not rev-parse: it also names the branch of a checkout with no commit yet.
-BRANCH=$(git -C "$WORKTREE" symbolic-ref --short -q HEAD) \
-  || BRANCH="detached-$(git -C "$WORKTREE" rev-parse --short HEAD 2>/dev/null)" \
-  || die "can't read the branch of $WORKTREE"
+BRANCH=$(git -C "$WORKTREE" symbolic-ref --short -q HEAD) || BRANCH=$(detached_name "$WORKTREE")
+[ "$BRANCH" != detached- ] || die "can't read the branch or commit of $WORKTREE"
 SAFE_BRANCH=$(safe_name "$BRANCH")
 # The repository's name is its main checkout's folder, the same for every linked worktree.
+# A short hash of where that checkout lives is appended, so two different repositories
+# that happen to share a folder name do not share (and prune) each other's folders.
 COMMON=$(cd "$WORKTREE" && cd "$(git rev-parse --git-common-dir)" && pwd)
-REPO=$(safe_name "$(basename "$(dirname "$COMMON")")")
+REPO=$(printf '%s' "$(basename "$(dirname "$COMMON")")" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^[.-]*//')
+REPO="${REPO:-repo}-$(printf '%s' "$COMMON" | sha256sum | cut -c1-8)"
 [ -n "$SAFE_BRANCH" ] && [ -n "$REPO" ] || die "couldn't derive a usable repo/branch name from $WORKTREE"
 
 # --- what to run ----------------------------------------------------------------
@@ -133,6 +143,13 @@ fi
 for bin in az ssh rsync timeout; do command -v "$bin" >/dev/null 2>&1 || die "'$bin' not found on PATH"; done
 [ -r "$BOX_RUNNER" ] || die "can't find the box-side runner at $BOX_RUNNER"
 [ -r "$RUNNER_ENV" ] || die "no appliance config at $RUNNER_ENV — run 'devbox -p lin-test up' first"
+# The file names the host this script connects to with the machine key, so it may only
+# be one that `devbox up` wrote: somewhere under the operator's devbox state, never a
+# file a caller made up to point the key at a destination of its choosing.
+case "$(readlink -f "$RUNNER_ENV")" in
+  "$HOME/.config/devbox/"*/runner.env) ;;
+  *) die "LIN_TEST_RUNNER_ENV must be a runner.env under $HOME/.config/devbox/ (got $RUNNER_ENV)" ;;
+esac
 # shellcheck disable=SC1090
 . "$RUNNER_ENV"
 : "${RESOURCE_GROUP:?runner.env missing RESOURCE_GROUP}"
@@ -140,6 +157,10 @@ for bin in az ssh rsync timeout; do command -v "$bin" >/dev/null 2>&1 || die "'$
 : "${SSH_HOST:?runner.env missing SSH_HOST}"
 : "${CI_DIR:?runner.env missing CI_DIR}"
 : "${SSH_PORT:=2222}"; : "${SSH_USER:=eddyg}"
+# These become an ssh command line, so each is held to the shape it must have.
+[[ $SSH_PORT =~ ^[0-9]{1,5}$ ]]        || die "SSH_PORT in runner.env is not a port number"
+[[ $SSH_HOST =~ ^[A-Za-z0-9.:-]+$ ]] && [[ $SSH_HOST != -* ]] || die "SSH_HOST in runner.env is not a host name or address"
+[[ $SSH_USER =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]] || die "SSH_USER in runner.env is not a user name"
 case "$CI_DIR" in /*) ;; *) die "CI_DIR in runner.env must be an absolute path, got '$CI_DIR'" ;; esac
 case "$CI_DIR" in *[!a-zA-Z0-9/._-]*|*..*) die "CI_DIR in runner.env has characters outside [a-zA-Z0-9/._-]" ;; esac
 AZ_SUB=(); [ -n "${SUBSCRIPTION_ID:-}" ] && AZ_SUB=(--subscription "$SUBSCRIPTION_ID")
@@ -225,35 +246,62 @@ printf '%s\n' "$CMD" > "$STAGE/command"
 # so the box can drop the folders of branches that are gone.
 git -C "$WORKTREE" for-each-ref --format='%(refname:short)' refs/heads \
   | while IFS= read -r b; do safe_name "$b"; echo; done > "$STAGE/branches"
+# …and every worktree checked out at a bare commit, under the name its runs use.
+git -C "$WORKTREE" worktree list --porcelain \
+  | awk '/^worktree /{w=substr($0,10)} /^detached$/{print w}' \
+  | while IFS= read -r w; do safe_name "$(detached_name "$w")"; echo; done >> "$STAGE/branches"
 echo "$SAFE_BRANCH" >> "$STAGE/branches"
 rsync -a -e "$RSYNC_RSH" "$STAGE/" "$REMOTE:$RUNDIR/" || die "couldn't hand the run over to the box"
 rsync -a -e "$RSYNC_RSH" "$BOX_RUNNER" "$REMOTE:$STATE_DIR/lin-test-run.sh" || die "couldn't copy the runner to the box"
 
 # Detached on the box (its own session, stdio to a file): the run belongs to the box from
 # here, and outlives this connection if it drops.
+# Marked as started BEFORE the call: if the connection drops just after the box has
+# started the runner, leaving must still tell it to stop. (Telling a run that never
+# started to stop is harmless.)
+RUNNER_STARTED=1
 "${SSH[@]}" "setsid nohup bash '$STATE_DIR/lin-test-run.sh' '$CI_DIR' '$RUN_ID' >'$RUNDIR/runner.out' 2>&1 </dev/null &" </dev/null \
   || die "couldn't start the runner on the box"
-RUNNER_STARTED=1
 echo "lin-test: run $RUN_ID — $REPO/$SAFE_BRANCH on $VM_NAME"
 echo "lin-test: command ($CMD_SOURCE): $CMD"
 
-# One remote call per poll: the state word, then the verdict once there is one.
-poll() { timeout 30 "${SSH[@]}" "cat '$RUNDIR/state' 2>/dev/null; echo; cat '$RUNDIR/done.json' 2>/dev/null" </dev/null 2>/dev/null || true; }
-verdict_of() { printf '%s\n' "$1" | sed -n '2,$p' | jq -c --arg id "$RUN_ID" 'select(.runId == $id)' 2>/dev/null | head -n 1; }
+# One remote call per poll. The reply is three parts: the word "alive" (so an answer from
+# a box with nothing to report yet is told apart from no answer at all), the state word,
+# then the verdict once there is one.
+poll() { timeout 30 "${SSH[@]}" "echo alive; cat '$RUNDIR/state' 2>/dev/null; echo; cat '$RUNDIR/done.json' 2>/dev/null" </dev/null 2>/dev/null || true; }
+state_of() { printf '%s\n' "$1" | sed -n '2p'; }
+# Always succeeds: a reply cut short mid-transfer is not JSON yet, and that must read as
+# "no verdict so far", not end this script (and with it abandon a healthy run).
+verdict_of() { printf '%s\n' "$1" | sed -n '3,$p' | jq -c --arg id "$RUN_ID" 'select(.runId == $id)' 2>/dev/null | head -n 1 || true; }
+# Lost contact is measured on the clock, not in polls: a poll against a box that is gone
+# takes as long as its connection timeout. Two minutes of silence ends the run.
+LAST_HEARD=$(date +%s)
+heard() { # $1 = a poll's reply
+  if [ "$(printf '%s\n' "$1" | head -n 1)" = alive ]; then LAST_HEARD=$(date +%s); return 0; fi
+  local quiet=$(( $(date +%s) - LAST_HEARD ))
+  [ "$quiet" -lt 120 ] || die "lost contact with the box for ${quiet}s (power state: $(power_state)) — no verdict"
+}
 
 # --- 4. wait for the box's run lock (other runs go first) -----------------------
-verdict=""; waited=0; announced=0
+verdict=""; announced=0; QSTART=$(date +%s); next_note=60
 while :; do
-  out=$(poll); st=$(printf '%s\n' "$out" | head -n 1)
+  out=$(poll); heard "$out"; st=$(state_of "$out")
   verdict=$(verdict_of "$out")
   [ -n "$verdict" ] && break
   [ "$st" = locked ] && break
+  waited=$(( $(date +%s) - QSTART ))
   if [ "$st" = queued ] && [ "$announced" = 0 ] && [ "$waited" -ge 4 ]; then
     echo "lin-test: another run has the box; queued (waits up to ${LOCK_TIMEOUT_S}s)…"; announced=1
   fi
-  [ "$waited" -lt $(( LOCK_TIMEOUT_S + 120 )) ] || die "the box never granted the run lock or reported why (waited ${waited}s)"
-  [ "$announced" = 1 ] && [ $(( waited % 60 )) -lt 2 ] && [ "$waited" -ge 60 ] && echo "lin-test: ⏱ still queued after ${waited}s"
-  sleep 2; waited=$((waited + 2))
+  # The box gives up on the lock by itself and says so; this is only the backstop behind it.
+  if [ "$waited" -ge $(( LOCK_TIMEOUT_S + 120 )) ]; then
+    echo "lin-test: the box never granted the run lock or reported why (waited ${waited}s)" >&2
+    exit 75
+  fi
+  if [ "$announced" = 1 ] && [ "$waited" -ge "$next_note" ]; then
+    echo "lin-test: ⏱ still queued after ${waited}s"; next_note=$(( next_note + 60 ))
+  fi
+  sleep 2
 done
 
 # --- 5. sync the worktree (under the lock, so no other run sees it half-written) --
@@ -273,26 +321,35 @@ if [ -z "$verdict" ]; then
   [ -s "$STAGE/manifest" ] || die "the worktree has no files git knows about — nothing to sync"
   # -a keeps a symlink a symlink: a link that points at a secret outside the worktree
   # travels as a dangling link, never as the secret's content.
-  rsync -a --from0 --files-from="$STAGE/manifest" -e "$RSYNC_RSH" "$WORKTREE/" "$REMOTE:$DEST/" \
-    || die "syncing the worktree to the box failed"
+  # The file list goes first: if this sync is cut short, the box still knows which files
+  # it may have received, and a later run removes any the worktree no longer has.
   rsync -a -e "$RSYNC_RSH" "$STAGE/manifest" "$REMOTE:$RUNDIR/manifest" || die "couldn't send the file list to the box"
+  # --checksum: content decides what is sent. rsync's usual size-and-time shortcut would
+  # skip an edit that kept a file's size within the same second, and the box would test
+  # the old content. Time-limited to end before the box stops waiting for the sync, so
+  # this never writes into the folder after the box has given the lock to another run.
+  timeout $(( SYNC_TIMEOUT_S - 120 )) \
+    rsync -a --checksum --from0 --files-from="$STAGE/manifest" -e "$RSYNC_RSH" "$WORKTREE/" "$REMOTE:$DEST/" \
+    || die "syncing the worktree to the box failed or took longer than $(( SYNC_TIMEOUT_S - 120 ))s"
+  # Only a run still holding the lock may be told to go on.
+  st=$(state_of "$(poll)")
+  [ "$st" = locked ] || die "the box stopped waiting for this run during the sync (state: ${st:-unknown})"
   "${SSH[@]}" "touch '$RUNDIR/synced'" </dev/null || die "couldn't tell the box the sync is done"
 
   # --- 6. stream the output and wait for the verdict ----------------------------
   # The stream is a convenience and may drop; the verdict file is what ends the run.
-  "${SSH[@]}" "tail -n +1 -F '$RUNDIR/run.log' 2>/dev/null" </dev/null &
+  # It is the output of whatever the project runs, shown on this terminal: colour codes
+  # are removed and every other control character dropped, so nothing in it can drive
+  # the terminal.
+  "${SSH[@]}" "tail -n +1 -F '$RUNDIR/run.log' 2>/dev/null" </dev/null \
+    > >(sed -u 's/\x1b\[[0-9;?]*[A-Za-z]//g' | stdbuf -oL tr -d '\000-\010\013-\037\177') &
   TAIL_PID=$!
-  START=$(date +%s); misses=0
+  START=$(date +%s); LAST_HEARD=$START
   while :; do
     sleep "$POLL_S"
     out=$(poll); verdict=$(verdict_of "$out")
     [ -n "$verdict" ] && break
-    if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
-      misses=$((misses + 1))
-      [ "$misses" -lt 12 ] || { state=$(power_state); die "lost contact with the box for $(( misses * POLL_S ))s (power state: ${state:-unknown}) — no verdict"; }
-    else
-      misses=0
-    fi
+    heard "$out"
     # The box enforces the command's limit itself; this is only the backstop behind it.
     if [ $(( $(date +%s) - START )) -ge $(( RUN_TIMEOUT_S + 180 )) ]; then
       echo "lin-test: ⛔ no verdict ${RUN_TIMEOUT_S}s+180s after the sync — the box-side runner is not answering. Diagnostics:" >&2
@@ -320,7 +377,10 @@ rc=$(printf '%s' "$verdict" | jq -r '.rc')
 err=$(printf '%s' "$verdict" | jq -r '.error // ""' | tr -d '\000-\037\177')
 summary=$(printf '%s' "$verdict" | jq -r '.summary // ""' | tr -d '\000-\037\177')
 secs=$(printf '%s' "$verdict" | jq -r '.seconds')
-[[ $rc =~ ^[0-9]+$ ]] || die "the box's verdict has no usable exit code: $verdict"
+# An exit code is 0 to 255. Anything else is not a verdict — and a number like 256 would
+# leave this script as 0.
+[[ $rc =~ ^[0-9]{1,3}$ ]] && [ "$rc" -le 255 ] || die "the box's verdict has no usable exit code"
+[[ $secs =~ ^[0-9]+$ ]] || secs="?"
 if [ "$fetch_ok" != 1 ] || [ ! -s "$RESULTS_DIR/done.json" ]; then
   echo "lin-test: ⚠️  fetching the results FAILED — they remain on the box at $RUNDIR" >&2
   if [ "$rc" = 0 ]; then
