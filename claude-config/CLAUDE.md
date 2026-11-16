@@ -53,11 +53,12 @@ otherwise do work on a repo, follow this workflow:
      rather than locking tests against a design that may
      change — note that tests are pending, or ask me.
 
-   - **Each project says how its tests run.** Which suites
-     exist, which command is the full check, and what each
-     needs is in the project's own CLAUDE.md, not here. The
-     rules below say where a suite runs once the project has
-     said what it is.
+   - **Learn how a project's tests run from the project
+     itself.** Which suites exist, which command is the full
+     check, and what each needs: read it from the project's
+     build and test scripts, its package manifest and its docs.
+     This file names no project. The rules below say where a
+     suite runs once you know what it is.
 
    - **Run tests on Linux where the project has a Linux
      lane.** If the project provides a way to run a suite on
