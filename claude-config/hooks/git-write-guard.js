@@ -21,6 +21,10 @@
 // branch for PR review (never a merge). clone and clean stay gated everywhere, a push
 // that targets main/master still asks, as does any mixed/gated/wrapped command.
 //
+// settings.json must NOT list a worktree-allowed subcommand under permissions.ask: an ask
+// rule there wins over this hook's "allow", so the command would prompt inside a worktree
+// too. Only the subcommands gated everywhere (clone, clean) belong in that list.
+//
 // One cross-OS implementation: run via `node` on Linux, Windows, and macOS.
 
 'use strict';
@@ -43,6 +47,8 @@ const WRITE_SUBS = new Set([
 // vetoed separately below). Deliberately absent: `clone` (network, creates repos at
 // arbitrary paths) and `clean` (deletes untracked files — `-x` would sweep symlinked
 // prereqs like .env/node_modules and ./tmp scratch, not reflog-recoverable).
+// Note on `stash`: it is allowed, but its list is shared by every worktree of a repo, so
+// a pop/drop/clear here can take or delete what another session shelved elsewhere.
 const WORKTREE_OK = new Set([
   'commit', 'push', 'checkout', 'switch', 'restore', 'merge', 'reset',
   'rebase', 'cherry-pick', 'revert', 'rm', 'mv', 'apply', 'am', 'stash',

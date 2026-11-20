@@ -58,32 +58,10 @@
       "PowerShell(chdir -*)"
     ],
     "ask": [
-      "Bash(git pull:*)",
       "Bash(git clone:*)",
-      "Bash(git merge:*)",
-      "Bash(git rebase:*)",
-      "Bash(git revert:*)",
-      "Bash(git switch:*)",
-      "Bash(git restore:*)",
-      "Bash(git mv:*)",
-      "Bash(git apply:*)",
-      "Bash(git am:*)",
-      "Bash(git cherry-pick:*)",
       "Bash(git clean:*)",
-      "Bash(git stash:*)",
-      "PowerShell(git pull:*)",
       "PowerShell(git clone:*)",
-      "PowerShell(git merge:*)",
-      "PowerShell(git rebase:*)",
-      "PowerShell(git revert:*)",
-      "PowerShell(git switch:*)",
-      "PowerShell(git restore:*)",
-      "PowerShell(git mv:*)",
-      "PowerShell(git apply:*)",
-      "PowerShell(git am:*)",
-      "PowerShell(git cherry-pick:*)",
-      "PowerShell(git clean:*)",
-      "PowerShell(git stash:*)"
+      "PowerShell(git clean:*)"
     ],
     "defaultMode": "acceptEdits"
   },

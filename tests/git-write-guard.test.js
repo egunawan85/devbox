@@ -92,6 +92,11 @@ const CASES = [
   ['ask', MAIN, `sh -c 'git -C ${WT} push'`],
   ['ask', WT, 'git push origin main'],
   ['ask', WT, 'git clean -fdx'],
+  ['allow', WT, 'git stash pop'],
+  ['allow', WT, 'git stash list'],
+  ['ask', MAIN, 'git stash pop'],
+  ['allow', WT, 'git rebase origin/main'],
+  ['allow', WT, 'git merge origin/main'],
   ['ask', WT, 'git clone https://example.com/r.git'],
 ];
 
