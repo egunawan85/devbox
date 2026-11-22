@@ -98,6 +98,34 @@ const CASES = [
   ['allow', WT, 'git rebase origin/main'],
   ['allow', WT, 'git merge origin/main'],
   ['ask', WT, 'git clone https://example.com/r.git'],
+
+  // --- deferred: a fast-forward-only pull is ungated everywhere ----------------
+  ['defer', MAIN, 'git pull --ff-only'],
+  ['defer', MAIN, 'git pull --ff-only origin'],
+  ['defer', MAIN, 'git pull --ff-only origin main'],
+  ['defer', MAIN, 'git pull --ff-only origin master'],
+  ['defer', MAIN, 'git pull --ff-only 2>&1 | tail -5'],
+  ['defer', MAIN, 'git fetch origin && git pull --ff-only origin main'],
+  ['defer', WT, `git -C ${MAIN} pull --ff-only`],
+  ['defer', WT, `git -C ${MAIN} pull --ff-only origin main`],
+  ['allow', WT, `git -C ${MAIN} pull --ff-only && git commit -m "x"`],
+
+  // --- asked: every other pull outside a worktree ------------------------------
+  ['ask', MAIN, 'git pull'],
+  ['ask', MAIN, 'git pull origin main'],
+  ['ask', MAIN, 'git pull --rebase'],
+  ['ask', MAIN, 'git pull --ff-only --rebase'],
+  ['ask', MAIN, 'git pull --ff-only origin feature'],
+  ['ask', MAIN, 'git pull --ff-only upstream main'],
+  ['ask', MAIN, 'git pull --ff-only origin main feature'],
+  ['ask', MAIN, 'git pull --ff-only --no-verify'],
+  ['ask', MAIN, 'git -c pull.rebase=true pull --ff-only'],
+  ['ask', MAIN, 'GIT_DIR=/elsewhere/.git git pull --ff-only'],
+  ['ask', MAIN, `git -C ${WT} --work-tree=${MAIN} pull --ff-only`],
+  ['ask', MAIN, "sh -c 'git pull --ff-only'"],
+  ['ask', MAIN, 'git pull --ff-only && git push'],
+  ['ask', MAIN, 'git pull --ff-only && git commit -m "x"'],
+  ['ask', WT, `git -C ${MAIN} pull`],
 ];
 
 let pass = 0;

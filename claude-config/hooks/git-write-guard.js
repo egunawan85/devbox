@@ -21,6 +21,14 @@
 // branch for PR review (never a merge). clone and clean stay gated everywhere, a push
 // that targets main/master still asks, as does any mixed/gated/wrapped command.
 //
+// Exception: a fast-forward-only pull — `git pull --ff-only`, optionally naming `origin`
+// and `main`/`master`, optionally aimed with one `-C <path>` — is not gated anywhere. It
+// can only advance a branch to commits its remote already has: no merge commit, no
+// rebase, and git refuses it when local work would be overwritten or the branch has
+// diverged. That is how a session brings a local main up to date without a prompt.
+// Every other pull (bare, --rebase, another remote or branch, extra options) still asks
+// outside a worktree.
+//
 // settings.json must NOT list a worktree-allowed subcommand under permissions.ask: an ask
 // rule there wins over this hook's "allow", so the command would prompt inside a worktree
 // too. Only the subcommands gated everywhere (clone, clean) belong in that list.
@@ -62,6 +70,13 @@ const WORKTREE_OK = new Set([
 // bare `/`, so a branch like `feature/main` doesn't trip it. False positives (e.g. a
 // branch literally named main-fix) only cost a spurious prompt, never a missed gate.
 const PUSH_TO_MAIN = /\bpush\b[\s\S]*?(?:[:\s]|refs\/heads\/)(?:HEAD:)?(?:main|master)\b/i;
+
+// A pull that can only fast-forward, written out in full so nothing rides along: no env
+// prefix, no global option but a single -C, no pull option but --ff-only, no remote but
+// origin, no branch but main/master. A trailing `2>&1` is tolerated because sessions
+// append it by habit. Anything else falls through to the normal pull gate.
+const FF_ONLY_PULL =
+  /^git(?:\.exe)?(?:\s+-C\s+(?:"[^"]*"|'[^']*'|\S+))?\s+pull\s+--ff-only(?:\s+origin(?:\s+(?:main|master))?)?(?:\s+2>&1)?$/;
 
 // git global options that consume a following separate argument.
 const OPT_WITH_ARG = new Set([
@@ -231,7 +246,8 @@ function main() {
         hookEventName: 'PreToolUse',
         permissionDecision: 'ask',
         permissionDecisionReason:
-          `git '${sub}' is a write/network operation - requires your approval`,
+          `git '${sub}' is a write/network operation - requires your approval` +
+          (sub === 'pull' ? " (only a plain 'git pull --ff-only' runs without it)" : ''),
       },
     }));
     process.exit(0);
@@ -272,6 +288,9 @@ function main() {
     const segRedirs = [];
     const segCdirs = [];
     const sub = gitSubcommand(seg, segRedirs, segCdirs);
+    // A fast-forward-only pull is ungated wherever it runs, so neither it nor its -C
+    // counts against the rest of the command.
+    if (sub === 'pull' && FF_ONLY_PULL.test(seg.trim())) continue;
     redirs.push(...segRedirs);
     if (!sub || !WRITE_SUBS.has(sub)) continue;
     subs.push(sub);
