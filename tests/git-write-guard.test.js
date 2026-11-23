@@ -167,6 +167,24 @@ const CASES = [
   ['ask', MAIN, `sh -c 'git checkout --detach ${SHA}'`],
   ['ask', MAIN, `git checkout --detach ${SHA} && git push`],
   ['ask', MAIN, `git checkout --detach ${SHA} && git reset --hard`],
+
+  // --- deferred: a wrapped script merely named after a git write subcommand ------
+  ['defer', MAIN, `git -C ${WT} diff --stat HEAD -- infra | tail -4; env -C ${MAIN} bash infra/lib/restore.test.sh 2>&1 | tail -3`],
+  ['defer', MAIN, 'git status && bash scripts/reset-db.sh'],
+  ['defer', MAIN, 'git log -1 && sh lib/merge/run.sh'],
+  ['defer', MAIN, 'git diff | xargs ./tools/pre-commit'],
+  ['defer', MAIN, 'git status; bash clean.sh'],
+  ['defer', MAIN, 'git status; bash C:\\dev\\app\\stash\\run.sh'],
+
+  // --- asked: a real git write inside a wrapper, however it is quoted -----------
+  ['ask', MAIN, "bash -c 'git restore .'"],
+  ['ask', MAIN, 'bash -c "cd x && git push"'],
+  ['ask', MAIN, 'bash -c "git reset"'],
+  ['ask', MAIN, 'echo x | xargs git rm'],
+  ['ask', MAIN, "eval 'git cherry-pick abc123'"],
+  ['ask', MAIN, 'sudo sh -c "git clean -fdx"'],
+  ['ask', MAIN, `timeout 30 bash -c 'git -C ${MAIN} stash'`],
+  ['ask', MAIN, 'git status; bash restore.test.sh && bash -c "git restore ."'],
 ];
 
 let pass = 0;

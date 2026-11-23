@@ -344,8 +344,13 @@ function main() {
   // cost a spurious prompt.
   const writeAlt = [...WRITE_SUBS].join('|');
   // The window between `git` and the subcommand has to span global options, including a
-  // long `-C <absolute worktree path>`.
-  const GIT_WRITE = new RegExp(`\\bgit\\b[\\s\\S]{0,300}?\\b(${writeAlt})\\b`);
+  // long `-C <absolute worktree path>`. The subcommand must stand alone as a word: one
+  // that is part of a path or filename (`bash infra/restore.test.sh`, `scripts/reset-db.sh`)
+  // is not a git subcommand, and matching it would prompt for every wrapped script that
+  // happens to be named after one.
+  const GIT_WRITE = new RegExp(
+    `\\bgit\\b[\\s\\S]{0,300}?(?<![\\w./\\\\-])(${writeAlt})(?![\\w./\\\\-])`,
+  );
   let wrapperSub = null;
   if (segments.some(segmentHasWrapper)) {
     const m = GIT_WRITE.exec(cmd);
