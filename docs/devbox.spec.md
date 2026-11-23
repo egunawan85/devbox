@@ -99,9 +99,10 @@ Each requirement is observable — you can check whether a given box satisfies i
 - **C4** A **single cross-OS guard** — `git-write-guard.js`, run via `node` — gates
   git write/network ops (`push`, `commit`, `merge`, `reset`, …) to `ask` on every OS,
   including the wrapped forms (`git -C`, `-c`, env-prefixed, chained, quoted exe,
-  PowerShell call operator). One implementation, one home. The one write it lets
-  through everywhere is a fast-forward-only pull (`git pull --ff-only`, optionally
-  `origin main`), which can only advance a branch to what its remote already has.
+  PowerShell call operator). One implementation, one home. The writes it lets
+  through everywhere are a fast-forward-only pull (`git pull --ff-only`, optionally
+  `origin main`), which can only advance a branch to what its remote already has, and
+  a detached checkout (`git checkout --detach <commit>`), which moves no branch.
 - **C5** **The agent makes no ad-hoc SSH connection.** `Bash(ssh:*)` is **denied** in
   `settings.json`, and a second cross-OS guard — `ssh-host-guard.js`, run via `node` —
   denies the forms that prefix rule cannot see: `scp`, `sftp`, `ssh-copy-id`, `rsync` to

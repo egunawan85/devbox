@@ -22,6 +22,7 @@ const HOOK = path.join(ROOT, 'claude-config', 'hooks', 'git-write-guard.js');
 
 const MAIN = '/home/eddyg/dev/proj/app';
 const WT = `${MAIN}/.claude/worktrees/feature`;
+const SHA = '7206796165a7d130f277279800e270cdd50b3bcc';
 
 function run(cwd, command) {
   const r = spawnSync(process.execPath, [HOOK], {
@@ -126,6 +127,41 @@ const CASES = [
   ['ask', MAIN, 'git pull --ff-only && git push'],
   ['ask', MAIN, 'git pull --ff-only && git commit -m "x"'],
   ['ask', WT, `git -C ${MAIN} pull`],
+
+  // --- deferred: a detached checkout is ungated everywhere ----------------------
+  ['defer', MAIN, `git -C tmp/rt-opus checkout -q --detach ${SHA}`],
+  ['defer', MAIN, `git -C tmp/rt-opus checkout --detach --quiet 7206796`],
+  ['defer', MAIN, `git -C "${MAIN}/tmp/rt-opus" checkout -q --detach ${SHA} 2>&1`],
+  ['defer', MAIN, `git -C ${MAIN} checkout -q --detach ${SHA}`],
+  ['defer', MAIN, `git checkout --detach ${SHA}`],
+  ['defer', MAIN, 'git checkout --detach'],
+  ['defer', MAIN, 'git checkout --detach origin/main'],
+  ['defer', MAIN, 'git checkout -q --detach v1.2.0~2'],
+  ['defer', MAIN, `git fetch origin && git checkout --detach ${SHA} 2>&1 | tail -5`],
+  ['defer', MAIN, `git -C tmp/rt-a checkout -q --detach ${SHA} && git -C tmp/rt-b checkout -q --detach ${SHA}`],
+  ['defer', 'C:\\dev\\app', `git -C tmp\\rt-opus checkout -q --detach ${SHA}`],
+  ['allow', WT, `git -C ${MAIN} checkout --detach ${SHA} && git commit -m "x"`],
+
+  // --- asked: every other checkout outside a worktree --------------------------
+  ['ask', MAIN, `git checkout ${SHA}`],                          // --detach must be spelled out
+  ['ask', MAIN, 'git checkout main'],
+  ['ask', MAIN, 'git checkout -- .'],
+  ['ask', MAIN, `git checkout -f --detach ${SHA}`],              // discards local changes
+  ['ask', MAIN, `git checkout --detach --force ${SHA}`],
+  ['ask', MAIN, `git checkout --detach -m ${SHA}`],              // merges local changes
+  ['ask', MAIN, `git checkout --detach ${SHA} -- .`],
+  ['ask', MAIN, `git checkout --detach ${SHA} file.txt`],
+  ['ask', MAIN, `git checkout -b x --detach ${SHA}`],
+  ['ask', MAIN, 'git checkout --detach {-f,main}'],              // brace expansion hides -f
+  ['ask', MAIN, 'git checkout --detach $REF'],                   // unseen expansion
+  ['ask', MAIN, 'git checkout --detach $(cat ref)'],
+  ['ask', MAIN, `git -C tmp/rt-opus -C ../.. checkout --detach ${SHA}`],
+  ['ask', MAIN, `git -c core.hooksPath=x checkout --detach ${SHA}`],
+  ['ask', MAIN, `git --work-tree=${MAIN} checkout --detach ${SHA}`],
+  ['ask', MAIN, `GIT_DIR=${MAIN}/.git git checkout --detach ${SHA}`],
+  ['ask', MAIN, `sh -c 'git checkout --detach ${SHA}'`],
+  ['ask', MAIN, `git checkout --detach ${SHA} && git push`],
+  ['ask', MAIN, `git checkout --detach ${SHA} && git reset --hard`],
 ];
 
 let pass = 0;

@@ -29,6 +29,13 @@
 // Every other pull (bare, --rebase, another remote or branch, extra options) still asks
 // outside a worktree.
 //
+// Exception: a detached checkout — `git checkout --detach [<commit or branch>]`, optionally
+// quiet, optionally aimed with one `-C <path>` — is not gated anywhere. It only points that
+// checkout's HEAD at a commit: it moves no branch, creates no commit, reaches no remote,
+// and git refuses it when it would overwrite uncommitted work. That is how a session
+// re-points a reviewer's throwaway checkout at a newer build. Every other checkout (no
+// --detach, -f, -m, -b, path arguments) still asks outside a worktree.
+//
 // settings.json must NOT list a worktree-allowed subcommand under permissions.ask: an ask
 // rule there wins over this hook's "allow", so the command would prompt inside a worktree
 // too. Only the subcommands gated everywhere (clone, clean) belong in that list.
@@ -77,6 +84,13 @@ const PUSH_TO_MAIN = /\bpush\b[\s\S]*?(?:[:\s]|refs\/heads\/)(?:HEAD:)?(?:main|m
 // append it by habit. Anything else falls through to the normal pull gate.
 const FF_ONLY_PULL =
   /^git(?:\.exe)?(?:\s+-C\s+(?:"[^"]*"|'[^']*'|\S+))?\s+pull\s+--ff-only(?:\s+origin(?:\s+(?:main|master))?)?(?:\s+2>&1)?$/;
+
+// A detached checkout, written out in full so nothing rides along: no env prefix, no
+// global option but a single -C, no checkout option but -q/--quiet and --detach (so no
+// -f/-m to discard or merge local changes, no -b, no path arguments), and at most one
+// plain commit-or-branch name. Group 1 is the option run, which must include --detach.
+const DETACHED_CHECKOUT =
+  /^git(?:\.exe)?(?:\s+-C\s+(?:"[^"]*"|'[^']*'|\S+))?\s+checkout((?:\s+(?:-q|--quiet|--detach))+)(?:\s+[A-Za-z0-9_][\w.\/@^~-]*)?(?:\s+2>&1)?$/;
 
 // git global options that consume a following separate argument.
 const OPT_WITH_ARG = new Set([
@@ -274,6 +288,15 @@ function main() {
            !p.includes('$') && !p.split('/').includes('..');
   };
 
+  // The exemption is judged on one segment, so it is off whenever the command holds a
+  // character that splits segments or expands inside one — `{-f,main}` would otherwise
+  // read as a bare `git checkout --detach` and smuggle in a -f.
+  const plainShell = !/[{}()`$]/.test(cmd);
+  const isDetachedCheckout = (seg) => {
+    const m = DETACHED_CHECKOUT.exec(seg.trim());
+    return plainShell && !!m && /--detach/.test(m[1]);
+  };
+
   const subs = [];
   const redirs = [];
   // Third worktree signal: a session sitting in the main checkout that drives a worktree
@@ -291,6 +314,8 @@ function main() {
     // A fast-forward-only pull is ungated wherever it runs, so neither it nor its -C
     // counts against the rest of the command.
     if (sub === 'pull' && FF_ONLY_PULL.test(seg.trim())) continue;
+    // Likewise a detached checkout, which moves no branch.
+    if (sub === 'checkout' && isDetachedCheckout(seg)) continue;
     redirs.push(...segRedirs);
     if (!sub || !WRITE_SUBS.has(sub)) continue;
     subs.push(sub);

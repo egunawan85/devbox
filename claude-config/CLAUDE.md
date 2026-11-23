@@ -169,6 +169,12 @@ otherwise do work on a repo, follow this workflow:
    it never merges or rewrites anything. Any other form of
    pull still asks.
 
+   A second one: a detached checkout needs no go-ahead. Use
+   exactly `git checkout --detach <commit>` (optionally `-q`,
+   optionally `git -C <checkout>` in front). It moves no
+   branch and reaches no remote. Any other checkout outside a
+   worktree still asks.
+
 ## Write for the long term
 
 Code, comments, commit messages, and PRs outlive the plan
