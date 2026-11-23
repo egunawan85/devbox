@@ -162,6 +162,12 @@ otherwise do work on a repo, follow this workflow:
    `.claude/worktrees/`; clone, clean, push-to-main, and
    everything outside a worktree gated.)
 
+   When you drive a worktree from outside it, write its path
+   out literally in each command (`git -C <full worktree path>
+   push ...`), never through a shell variable (`W=...; git -C
+   $W push`). The hook cannot see what a variable expands to,
+   so it asks even for a pre-approved op.
+
    One exception outside a worktree: bringing a local main
    up to date with its remote needs no go-ahead. Use exactly
    `git pull --ff-only` (optionally `origin main`, optionally
