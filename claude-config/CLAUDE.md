@@ -170,7 +170,7 @@ otherwise do work on a repo, follow this workflow:
 
    One exception outside a worktree: bringing a local main
    up to date with its remote needs no go-ahead. Use exactly
-   `git pull --ff-only` (optionally `origin main`, optionally
+   `git pull --ff-only` (optionally `-q`, `origin main`, or
    `git -C <checkout>` in front). It can only fast-forward, so
    it never merges or rewrites anything. Any other form of
    pull still asks.

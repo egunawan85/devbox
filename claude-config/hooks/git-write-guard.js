@@ -21,8 +21,9 @@
 // branch for PR review (never a merge). clone and clean stay gated everywhere, a push
 // that targets main/master still asks, as does any mixed/gated/wrapped command.
 //
-// Exception: a fast-forward-only pull — `git pull --ff-only`, optionally naming `origin`
-// and `main`/`master`, optionally aimed with one `-C <path>` — is not gated anywhere. It
+// Exception: a fast-forward-only pull — `git pull --ff-only`, optionally quiet, optionally
+// naming `origin` and `main`/`master`, optionally aimed with one `-C <path>` — is not
+// gated anywhere. It
 // can only advance a branch to commits its remote already has: no merge commit, no
 // rebase, and git refuses it when local work would be overwritten or the branch has
 // diverged. That is how a session brings a local main up to date without a prompt.
@@ -79,11 +80,12 @@ const WORKTREE_OK = new Set([
 const PUSH_TO_MAIN = /\bpush\b[\s\S]*?(?:[:\s]|refs\/heads\/)(?:HEAD:)?(?:main|master)\b/i;
 
 // A pull that can only fast-forward, written out in full so nothing rides along: no env
-// prefix, no global option but a single -C, no pull option but --ff-only, no remote but
+// prefix, no global option but a single -C, no pull option but --ff-only and -q/--quiet
+// (which only silences output), no remote but
 // origin, no branch but main/master. A trailing `2>&1` is tolerated because sessions
 // append it by habit. Anything else falls through to the normal pull gate.
 const FF_ONLY_PULL =
-  /^git(?:\.exe)?(?:\s+-C\s+(?:"[^"]*"|'[^']*'|\S+))?\s+pull\s+--ff-only(?:\s+origin(?:\s+(?:main|master))?)?(?:\s+2>&1)?$/;
+  /^git(?:\.exe)?(?:\s+-C\s+(?:"[^"]*"|'[^']*'|\S+))?\s+pull(?:\s+(?:-q|--quiet))?\s+--ff-only(?:\s+(?:-q|--quiet))?(?:\s+origin(?:\s+(?:main|master))?)?(?:\s+2>&1)?$/;
 
 // A detached checkout, written out in full so nothing rides along: no env prefix, no
 // global option but a single -C, no checkout option but -q/--quiet and --detach (so no
