@@ -90,10 +90,10 @@ new_run r-counts proj main 'printf "      Tests  1200 passed | 3 skipped (1203)\
 run_to_end r-counts proj main a.txt
 check "vitest summary lines are summed across runs"  '[[ "$(summary_of r-counts)" == *"counts=vitest runs=2 passed=1310 failed=2 skipped=4" ]]' "$(summary_of r-counts)"
 
-new_run r-timeout proj main 'sleep 300' RUN_TIMEOUT=2
+new_run r-timeout proj main 'sleep 473' RUN_TIMEOUT=2
 run_to_end r-timeout proj main a.txt
 check "a command past its limit is stopped with rc 124" '[ "$(rc_of r-timeout)" = 124 ] && [[ "$(err_of r-timeout)" == *"timed out"* ]]' "rc=$(rc_of r-timeout) err=$(err_of r-timeout)"
-check "nothing of it is left running"                '! pgrep -f "sleep 300" >/dev/null'
+check "nothing of it is left running"                '! pgrep -f "sleep 473" >/dev/null'
 
 new_run r-abort proj main 'sleep 300'
 bash "$RUNNER" "$CI" r-abort >/dev/null 2>&1 &
@@ -300,9 +300,9 @@ done
 exec "$REAL_RSYNC" "\${args[@]}"
 EOF
 chmod +x "$FB/az" "$FB/ssh" "$FB/rsync"
-for b in boxa boxb; do
+for b in boxa boxb boxc; do
   mkdir -p "$PH/.config/devbox/$b" "$SCRATCH/$b/ci"
-  h=10.0.0.1; [ "$b" = boxb ] && h=10.0.0.2
+  h=10.0.0.1; [ "$b" = boxb ] && h=10.0.0.2; [ "$b" = boxc ] && h=10.0.0.3
   printf 'RESOURCE_GROUP=rg\nVM_NAME=%s\nSSH_HOST=%s\nSSH_USER=tester\nCI_DIR=%s\n' "$b" "$h" "$SCRATCH/$b/ci" \
     >"$PH/.config/devbox/$b/runner.env"
 done
@@ -314,7 +314,7 @@ pick() { pool bash "$ORCH" --pick-only -- true | sed -n 's/^would use:  //p'; }
 power() { echo "$1" >"$FAKE/power/boxa"; echo "$2" >"$FAKE/power/boxb"; }
 prepo=$(pool bash "$ORCH" --resolve-only -- true | sed -n 's/^repo:     //p')
 # A stand-in for a run in flight: a claim that names a process which is really alive.
-sleep 300 & HOLD=$!
+sleep 474 & HOLD=$!
 claim() { mkdir -p "$PD/claims/$1"; printf '%s %s\n' "$HOLD" "$(sed 's/.*) //' "/proc/$HOLD/stat" | awk '{print $20}')" >"$PD/claims/$1/$2"; }
 reset() { rm -rf "$PD/claims" "$PD/warm" "$FAKE/started"; rm -f "$FAKE/nostart"/* "$FAKE/down"/*; power deallocated deallocated; }
 
@@ -331,6 +331,10 @@ check "both busy and level: the one with the folder"   '[ "$(pick)" = boxa ]' "$
 claim boxa r3
 check "both busy: the one with the fewest runs"        '[ "$(pick)" = boxb ]' "$(pick)"
 check "choosing alone claims nothing"                  '[ "$(ls "$PD/claims/boxa" "$PD/claims/boxb" | grep -c "^r")" = 3 ]'
+# The list is the only place that knows how many there are.
+check "a third appliance is one more name on the list" '[ "$(APPL="boxa boxb boxc" pick)" = boxc ]' "$(APPL="boxa boxb boxc" pick)"
+claim boxc r4; claim boxc r5
+check "and the fewest runs wins among three"           '[ "$(APPL="boxa boxb boxc" pick)" = boxb ]' "$(APPL="boxa boxb boxc" pick)"
 reset; power running deallocated
 mkdir -p "$PD/claims/boxa"; echo "999999999 1" >"$PD/claims/boxa/dead"
 check "a claim whose run is gone does not count"       '[ "$(pick)" = boxa ] && [ ! -e "$PD/claims/boxa/dead" ]' "$(pick)"
@@ -338,10 +342,10 @@ reset; claim boxa r1
 out=$(pool env LIN_TEST_RUNNER_ENV="$PH/.config/devbox/boxa/runner.env" bash "$ORCH" --pick-only -- true)
 check "LIN_TEST_RUNNER_ENV pins the run to that box"   '[[ "$out" == *"would use:  boxa"* ]]' "$out"
 reset
-out=$(APPL="boxa boxc" pool bash "$ORCH" --pick-only -- true)
-check "an appliance not stood up is left out, and said so" '[[ "$out" == *"boxc"*"not stood up"* ]] && [[ "$out" == *"would use:  boxa"* ]]' "$out"
-out=$(APPL="boxc boxd" pool bash "$ORCH" --pick-only -- true)
-check "with none stood up the run is refused"          '[[ "$out" == *"no appliance config at "*"/boxc/runner.env"* ]]' "$out"
+out=$(APPL="boxa boxx" pool bash "$ORCH" --pick-only -- true)
+check "an appliance not stood up is left out, and said so" '[[ "$out" == *"boxx"*"not stood up"* ]] && [[ "$out" == *"would use:  boxa"* ]]' "$out"
+out=$(APPL="boxx boxy" pool bash "$ORCH" --pick-only -- true)
+check "with none stood up the run is refused"          '[[ "$out" == *"no appliance config at "*"/boxx/runner.env"* ]]' "$out"
 
 echo "runs across two appliances"
 
