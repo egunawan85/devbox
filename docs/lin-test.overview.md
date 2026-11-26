@@ -71,9 +71,16 @@ Measured on the appliance in November 2026, with anvil's check (about 1,290 test
   until after the command, makes them take turns. This is the simplest thing that is
   correct, and it is what win-test does. The alternative — a port per run — would mean
   changing each project to suit the appliance.
-- **One box, shared by every session.** A box each would cost more disk and more cold
-  starts and buy nothing while runs queue anyway. If the queue ever hurts, add a second
-  appliance.
+- **Two boxes, shared by every session.** One was the plan until the queue hurt: with
+  several branches in flight, a run waited 20 to 40 minutes for its turn. So there is a
+  second, identical appliance, and a run goes to whichever nobody is using. Not a box
+  per session — that would cost more disk and more cold starts — and still one run at a
+  time on each. A third is one command and one name on a list.
+- **A run is placed from the devbox's own notes.** Every run starts on the devbox, so it
+  keeps a note of which runs are on which box, and a run chooses before it contacts
+  anything: a box nobody is using, preferring the one that already has the branch's
+  folder; a queue only when both are busy. Asking the boxes instead would mean waking
+  one to find out it was busy.
 - **The box owns its own lifecycle.** The runner only ever *starts* it. A timer on the box
   deallocates it once no run holds the lock and it has been idle ten minutes — a real
   deallocate, because a VM that is merely powered off is still billed. So parallel
@@ -99,9 +106,13 @@ Prices are Azure's public pay-as-you-go rates for Linux in southeastasia, Novemb
 | `Standard_D4as_v7` (4 vCPU / 16 GB) while running | $0.228 / hour |
 | 64 GB Premium SSD (P6), always | $10.21 / month |
 | Static public IP, always | $3.65 / month |
-| **Off, per month** | **about $14** |
+| **Off, per month, each box** | **about $14** |
 | One isolated run (the run plus its ten idle minutes) | about $0.08 |
 | The same VM left on all month | about $166 |
+
+The second box adds its $14 a month and, each time it is woken, the ten to fifteen idle
+minutes before it turns itself off again — about 5 cents. The runs themselves cost what
+they did: the same minutes, on two boxes instead of one.
 
 The size was chosen for the room it had as much as its price: the `D4ads_v7` win-test
 uses is the same generation at $0.286/hour, but its vCPU family's quota was nearly spent,
@@ -110,6 +121,8 @@ and its extra local disk is of no use to a box that deallocates between runs.
 ## Out of scope (for now)
 
 - Parallel runs on one box (see above).
+- Moving a queued run to a box that frees up first, and sharing a branch's folder
+  between boxes.
 - Forwarding secrets to a run. win-test has a narrow channel for that because some of its
   suites cannot run without one; nothing here needs it yet, and not having it is what
   makes "credential-free" a property of the box rather than a habit.

@@ -12,7 +12,8 @@
 #     running" from "finished, exit 0" from "finished, exit 1" without guessing.
 #
 # Unlike win-test-launch.sh it holds no lock and refuses nothing: runs that overlap are
-# expected here, and they queue on the box (docs/lin-test.spec.md, Concurrency).
+# expected here: they spread over the appliances, and queue on one only when all are busy
+# (docs/lin-test.spec.md, Placement and Concurrency).
 #
 # Usage:
 #   lin-test-launch.sh [<any lin-test.sh argument>...]

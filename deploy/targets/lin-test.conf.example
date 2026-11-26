@@ -9,6 +9,12 @@
 # deploy/targets/lin-test.conf (gitignored) and edit; select with:
 #   devbox -p lin-test up | status | doctor | toolchain | ssh | down
 #
+# /lin-test uses more than one of these (docs/lin-test.spec.md, R2a). A further appliance
+# is this same file under its own profile name — deploy/targets/lin-test-2.conf — with
+# four names changed so it gets its own resource group and `down` removes only it:
+#   RESOURCE_GROUP=lin-test-2-rg  DROPLET_NAME=lin-test-2  FIREWALL_NAME=lin-test-2-nsg  TAG=lin-test-2
+# Everything else stays the same, so a check behaves alike on each.
+#
 # Azure auth is interactive: run `az login` once on this machine. The subscription is
 # pinned below (SUBSCRIPTION_ID); the CLI runs `az account set` so it never depends on
 # the globally-active subscription.

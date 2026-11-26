@@ -9,8 +9,9 @@
 #   lin-test-run.sh <ci_dir> <run_id>
 #
 # The orchestrator prepares <ci_dir>/.lin-test/runs/<run_id>/ before starting this:
-#   params     KEY=VALUE lines: REPO, BRANCH, CLEAN, RUN_TIMEOUT, LOCK_TIMEOUT,
-#              SYNC_TIMEOUT, RETAIN_DAYS, MIN_FREE_GB
+#   params     KEY=VALUE lines: REPO, BRANCH, CLEAN, BOX (this appliance's name, for the
+#              summary line), RUN_TIMEOUT, LOCK_TIMEOUT, SYNC_TIMEOUT, RETAIN_DAYS,
+#              MIN_FREE_GB
 #   command    the shell text to run in the synced worktree
 #   branches   the repo's live branches (sanitized names, one per line), for pruning
 # and adds, once this script reports `locked`:
@@ -112,7 +113,7 @@ param() {
   case "$v" in *[!A-Za-z0-9._-]*) v="" ;; esac
   printf '%s' "${v:-${2:-}}"
 }
-REPO=$(param REPO); BRANCH=$(param BRANCH); CLEAN=$(param CLEAN 0)
+REPO=$(param REPO); BRANCH=$(param BRANCH); CLEAN=$(param CLEAN 0); BOX=$(param BOX)
 RUN_TIMEOUT=$(param RUN_TIMEOUT 2400); LOCK_TIMEOUT=$(param LOCK_TIMEOUT 3600); SYNC_TIMEOUT=$(param SYNC_TIMEOUT 900)
 RETAIN_DAYS=$(param RETAIN_DAYS 14); MIN_FREE_GB=$(param MIN_FREE_GB 20)
 num() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; }
@@ -267,6 +268,8 @@ counts=$(sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$LOG" | awk '
     else      printf "counts=none"
   }')
 summary="LIN-TEST-SUMMARY repo=$REPO branch=$BRANCH rc=$rc seconds=$(( $(date +%s) - START )) $counts"
+# Which appliance this was, last on the line so everything before it reads as it always has.
+[ -z "$BOX" ] || summary="$summary box=$BOX"
 say "$summary"
 
 # ---- 6. housekeeping (never fails a run) ---------------------------------------
