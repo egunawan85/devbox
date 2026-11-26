@@ -182,6 +182,17 @@ devbox -p lin-test down       # deletes the resource group; nothing billable is 
 Run these **on the Linux devbox**: the appliance authorizes the key of the machine that
 ran `up`, and `up` writes `~/.config/devbox/lin-test/runner.env` there for `/lin-test`.
 
+`/lin-test` spreads runs over every appliance on its list (`lin-test lin-test-2`; one
+line in `claude-config/scripts/lin-test.sh`). Each further one is the same profile under
+another name — copy the conf, change the four names in it as the example says, and `up`:
+
+```sh
+cp deploy/targets/lin-test.conf deploy/targets/lin-test-2.conf   # RESOURCE_GROUP, DROPLET_NAME, FIREWALL_NAME, TAG
+devbox -p lin-test-2 up
+```
+
+An appliance on the list that has not been stood up is simply left out.
+
 What `up` does differently for this profile, because it sets `CREDENTIAL_FREE=1`:
 
 - **First boot is `cloud-init.appliance.yaml`**, handed to `az vm create` as custom data.

@@ -16,6 +16,12 @@ Each requirement is observable — you can check whether a given setup satisfies
 - **R2** It is provisioned as the profile **`lin-test`** (`deploy/targets/lin-test.conf`).
   RG **`lin-test-rg`**, VM **`lin-test`**, in the same subscription and region as win-test,
   so `down` removes exactly this appliance.
+- **R2a** There is **more than one appliance**: `lin-test` and `lin-test-2`, each its own
+  profile, resource group and VM, alike in image, size and behavior. Every requirement
+  here holds for each of them separately — its own lifecycle (§L), folders (§S) and run
+  lock (§C). Which ones exist is **one setting**, the list in `lin-test.sh`
+  (`LIN_TEST_APPLIANCES` overrides it); another appliance is `devbox -p <name> up` and
+  its name on that list.
 - **R3** SKU default **`Standard_D4as_v7`** (4 vCPU / 16 GB), OS disk **64 GB Premium
   SSD**. Four cores to match the devbox a check is tuned on; 16 GB because a check builds,
   lints and runs two test runs beside a database at once. The disk is the only thing that
@@ -44,7 +50,8 @@ Each requirement is observable — you can check whether a given setup satisfies
 
 - **L1** The box is **deallocated by default**; it runs only while a run needs it.
 - **L2** The **runner only ever starts** the box (`az vm start`, idempotent). It never
-  stops or deallocates it — so concurrent sessions cannot stop the box under one another.
+  stops or deallocates it, on any path, the move to another appliance (§P4) included —
+  so concurrent sessions cannot stop a box under one another.
   A runner that finds the box mid-deallocation waits for that to finish before starting it.
 - **L3** A **box-side idle monitor** (a systemd timer, every 5 minutes, as root)
   deallocates the box when **no run is active AND** it has been idle longer than
@@ -98,6 +105,9 @@ Each requirement is observable — you can check whether a given setup satisfies
   repository whose branch no longer exists there; evict least-recently-used first while
   free disk is under `CI_MIN_FREE_GB` (default 20). Never the folder of the run in
   progress. GC never fails a run.
+- **S7** Folders are **per appliance** and never shared or copied between them. A
+  branch's first run on an appliance is a cold install; §P2 is what keeps a branch on
+  the appliance that already has its folder.
 
 ## C — Concurrency
 
@@ -116,8 +126,31 @@ Each requirement is observable — you can check whether a given setup satisfies
   group when it exits is stopped before the lock is given up, and if the runner itself is
   killed outright its command is stopped within seconds and its heartbeat ends. Docker
   containers are the daemon's, not the command's, and are left as the project left them.
-- **C5** There is **one box, shared** by every session. If throughput ever matters, the
-  remedy is a second appliance, not parallel runs on this one.
+- **C5** Every appliance is **shared** by every session. Throughput comes from more
+  appliances (§R2a, §P), never from parallel runs on one.
+
+## P — Placement (which appliance a run uses)
+
+- **P1** A run is placed **before it contacts a box**, from a record kept on the devbox —
+  every run starts there — of the runs in flight on each appliance. A run's entry names
+  its orchestrator process and is removed when the run leaves; an entry whose process is
+  gone does not count, so a killed run frees its place by dying.
+- **P2** The order: **an appliance no run is using** — the one that already has this
+  branch's folder first (a box is back in about a minute; a cold install takes longer),
+  then one that is already running, then the list's order. **Only when every appliance
+  is in use** does a run queue, on the one with the fewest runs, the one with this
+  branch's folder first. Under light load everything therefore stays on the first
+  appliance and the others stay off.
+- **P3** Choosing and recording happen **under one lock**, so runs started in the same
+  instant see each other and land on different appliances.
+- **P4** An appliance that is **not stood up** (no `runner.env`) is left out, and the run
+  says so. One that **cannot be started or reached** is passed over: the run moves to
+  the next choice and says so. That happens only before the run is handed to a box; a
+  box lost after that is lost contact (§X7), and the run is not repeated elsewhere. With
+  no appliance usable the run fails loudly.
+- **P5** A queued run **stays where it queued**, even if another appliance frees up first.
+- **P6** `LIN_TEST_RUNNER_ENV` names one appliance's `runner.env` and **pins** the run to
+  it. `--pick-only` prints the choice a run would make and starts nothing.
 
 ## X — Execution & results
 
@@ -160,9 +193,12 @@ Each requirement is observable — you can check whether a given setup satisfies
 - **X9** The run ends with a **machine-readable line**:
 
   ```
-  LIN-TEST-SUMMARY repo=<r> branch=<b> rc=<n> seconds=<n> counts=vitest runs=<k> passed=<n> failed=<n> skipped=<n>
-  LIN-TEST-SUMMARY repo=<r> branch=<b> rc=<n> seconds=<n> counts=none
+  LIN-TEST-SUMMARY repo=<r> branch=<b> rc=<n> seconds=<n> counts=vitest runs=<k> passed=<n> failed=<n> skipped=<n> box=<appliance>
+  LIN-TEST-SUMMARY repo=<r> branch=<b> rc=<n> seconds=<n> counts=none box=<appliance>
   ```
+
+  `box` is the appliance the run was on, and is the last field: everything before it
+  reads as it did when there was one appliance.
 
   `rc` is the verdict. The counts are read from the test runner's own summary lines in
   the log (vitest's `Tests  N passed | M failed`), summed over every test run in it;
@@ -178,9 +214,11 @@ Each requirement is observable — you can check whether a given setup satisfies
   the box (§C1).
 - **I2** The **box-side runner is not installed on the box**: the orchestrator copies its
   own copy over at the start of every run, so the two halves cannot drift apart.
-- **I3** Box identity + tunables reach the runner via
-  **`~/.config/devbox/lin-test/runner.env`**, written by `devbox -p lin-test up`. If it is
-  absent the runner **fails with a clear "stand up the appliance first"** message.
+- **I3** Each appliance's identity + tunables reach the runner via
+  **`~/.config/devbox/<appliance>/runner.env`**, written by `devbox -p <appliance> up`.
+  If no appliance has one the runner **fails with a clear "stand up the appliance
+  first"** message. The placement record (§P1) lives beside them, in
+  `~/.config/devbox/lin-test-pool/`.
 - **I4** The runner reaches the box by SSH **from inside its script**, with the devbox's
   machine key, never a forwarded agent. The devbox's guard against ad-hoc SSH is
   unchanged: an agent still cannot compose a connection to the box itself. The host the
@@ -196,9 +234,11 @@ Each requirement is observable — you can check whether a given setup satisfies
 
 - `tests/lin-test.test.sh` exercises the box-side runner against a scratch directory (lock
   and queueing, sync hand-off and deletions, the stand-in repository, limits, abandonment,
-  the verdict and its counts, pruning), the idle monitor's decision in dry-run, and the
-  command resolution of §X2. No network.
+  the verdict and its counts, pruning), the idle monitor's decision in dry-run, the
+  command resolution of §X2, and placement (§P) — the order of choice, and whole runs
+  across two stand-in appliances: three at once, a box that will not start, a box that
+  cannot be reached. No network.
 - Live, on the appliance: `devbox -p lin-test up` from nothing, `doctor`, a full
   `/lin-test` of a project's check with counts compared against the same check on the
-  devbox, two runs asked for at once, and the box found deallocated (`az vm list -d`)
-  after being left alone.
+  devbox, three runs asked for at once (two side by side on different appliances, the
+  third queued), and every box found deallocated (`az vm list -d`) after being left alone.

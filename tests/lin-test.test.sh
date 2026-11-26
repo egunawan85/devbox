@@ -3,12 +3,15 @@
 #   claude-config/scripts/lin-test-run.sh   the box-side runner (lock, sync hand-off,
 #                                           deletions, stand-in git repo, limits, verdict,
 #                                           pruning)
-#   claude-config/scripts/lin-test.sh       only its --resolve-only path (what would run)
+#   claude-config/scripts/lin-test.sh       what would run (--resolve-only), which
+#                                           appliance a run chooses, and whole runs across
+#                                           two stand-in appliances
 #   deploy/azure/idle-monitor.sh            the stay-up / deallocate decision, dry-run
 #
 # The runner is plain bash over a directory, so a scratch directory stands in for the
 # box: each case plays the orchestrator's part by hand (write the run's parameters,
 # wait for `locked`, put files in place, signal `synced`) and reads the verdict.
+# The orchestrator's cases replace az, ssh and rsync on PATH, so nothing leaves this machine.
 # No network, no ssh, no Azure. Scratch lives under ./tmp/ and is removed on success.
 #
 # Run: tests/lin-test.test.sh
@@ -258,6 +261,119 @@ mkdir -p "$fx/scripts"; printf '# the full check\nLIN_TEST_CMD=make check && mak
 check "scripts/lin-test.env wins over the default"     '[[ "$(resolve)" == *"command:  make check && make lint"* ]] && [[ "$(resolve)" == *"timeout:  900s"* ]]' "$(resolve | grep -E "command|timeout")"
 check "a command after -- wins over both"              '[[ "$(resolve -- npm test -- --run)" == *"command:  npm test -- --run"* ]]' "$(resolve -- npm test -- --run | grep command)"
 check "--cmd is the same thing as one string"          '[[ "$(resolve --cmd "a && b")" == *"command:  a && b"* ]]'
+
+echo "choosing an appliance"
+
+# Two scratch directories stand in for two appliances. `az`, `ssh` and `rsync` are
+# replaced on PATH: az keeps each box's power state in a file, ssh runs the command on
+# this machine (and fails for a host marked down), rsync drops the remote prefix. HOME is
+# a scratch folder, so the runner.env files and the record of who is on which box are too.
+FAKE="$SCRATCH/fake"; FB="$SCRATCH/bin"; PH="$SCRATCH/home"
+mkdir -p "$FAKE/power" "$FAKE/nostart" "$FAKE/down" "$FB" "$PH/.config/devbox"
+REAL_RSYNC=$(command -v rsync)
+cat >"$FB/az" <<'EOF'
+#!/usr/bin/env bash
+name=""; prev=""
+for a in "$@"; do [ "$prev" = -n ] && name=$a; prev=$a; done
+case "$2" in
+  get-instance-view) echo "PowerState/$(cat "$FAKE/power/$name" 2>/dev/null || echo deallocated)" ;;
+  start) [ -e "$FAKE/nostart/$name" ] && exit 1; echo running >"$FAKE/power/$name"; echo "$name" >>"$FAKE/started" ;;
+esac
+EOF
+cat >"$FB/ssh" <<'EOF'
+#!/usr/bin/env bash
+cmd="${!#}"; n=$(( $# - 1 )); dest="${!n}"
+[ -e "$FAKE/down/${dest#*@}" ] && exit 255
+# The log stream must be the process the orchestrator stops, not a child left behind it.
+case "$cmd" in "tail "*) exec bash -c "exec $cmd" ;; esac
+exec bash -c "$cmd"
+EOF
+cat >"$FB/rsync" <<EOF
+#!/usr/bin/env bash
+args=(); skip=0
+for a in "\$@"; do
+  if [ "\$skip" = 1 ]; then skip=0; continue; fi
+  if [ "\$a" = -e ]; then skip=1; continue; fi
+  case "\$a" in tester@*:*) a=\${a#*:} ;; esac
+  args+=("\$a")
+done
+exec "$REAL_RSYNC" "\${args[@]}"
+EOF
+chmod +x "$FB/az" "$FB/ssh" "$FB/rsync"
+for b in boxa boxb; do
+  mkdir -p "$PH/.config/devbox/$b" "$SCRATCH/$b/ci"
+  h=10.0.0.1; [ "$b" = boxb ] && h=10.0.0.2
+  printf 'RESOURCE_GROUP=rg\nVM_NAME=%s\nSSH_HOST=%s\nSSH_USER=tester\nCI_DIR=%s\n' "$b" "$h" "$SCRATCH/$b/ci" \
+    >"$PH/.config/devbox/$b/runner.env"
+done
+PD="$PH/.config/devbox/lin-test-pool"
+px="$SCRATCH/px"; mkdir -p "$px"; git -C "$px" init -q -b main .; echo hello >"$px/file.txt"
+pool() { ( cd "$px" && env HOME="$PH" PATH="$FB:$PATH" FAKE="$FAKE" LIN_TEST_APPLIANCES="${APPL:-boxa boxb}" \
+             LIN_TEST_POLL=1 LIN_TEST_BOOT_TIMEOUT=5 "$@" 2>&1 ); }
+pick() { pool bash "$ORCH" --pick-only -- true | sed -n 's/^would use:  //p'; }
+power() { echo "$1" >"$FAKE/power/boxa"; echo "$2" >"$FAKE/power/boxb"; }
+prepo=$(pool bash "$ORCH" --resolve-only -- true | sed -n 's/^repo:     //p')
+# A stand-in for a run in flight: a claim that names a process which is really alive.
+sleep 300 & HOLD=$!
+claim() { mkdir -p "$PD/claims/$1"; printf '%s %s\n' "$HOLD" "$(sed 's/.*) //' "/proc/$HOLD/stat" | awk '{print $20}')" >"$PD/claims/$1/$2"; }
+reset() { rm -rf "$PD/claims" "$PD/warm" "$FAKE/started"; rm -f "$FAKE/nostart"/* "$FAKE/down"/*; power deallocated deallocated; }
+
+reset
+check "with both free and off, the first in the list"  '[ "$(pick)" = boxa ]' "$(pick)"
+power deallocated running
+check "a free box that is running before one that is off" '[ "$(pick)" = boxb ]' "$(pick)"
+mkdir -p "$PD/warm/boxa/$prepo"; touch "$PD/warm/boxa/$prepo/main"
+check "a free box with the branch's folder before a running one" '[ "$(pick)" = boxa ]' "$(pick)"
+claim boxa r1
+check "a busy box is passed over, warm or not"         '[ "$(pick)" = boxb ]' "$(pick)"
+claim boxb r2
+check "both busy and level: the one with the folder"   '[ "$(pick)" = boxa ]' "$(pick)"
+claim boxa r3
+check "both busy: the one with the fewest runs"        '[ "$(pick)" = boxb ]' "$(pick)"
+check "choosing alone claims nothing"                  '[ "$(ls "$PD/claims/boxa" "$PD/claims/boxb" | grep -c "^r")" = 3 ]'
+reset; power running deallocated
+mkdir -p "$PD/claims/boxa"; echo "999999999 1" >"$PD/claims/boxa/dead"
+check "a claim whose run is gone does not count"       '[ "$(pick)" = boxa ] && [ ! -e "$PD/claims/boxa/dead" ]' "$(pick)"
+reset; claim boxa r1
+out=$(pool env LIN_TEST_RUNNER_ENV="$PH/.config/devbox/boxa/runner.env" bash "$ORCH" --pick-only -- true)
+check "LIN_TEST_RUNNER_ENV pins the run to that box"   '[[ "$out" == *"would use:  boxa"* ]]' "$out"
+reset
+out=$(APPL="boxa boxc" pool bash "$ORCH" --pick-only -- true)
+check "an appliance not stood up is left out, and said so" '[[ "$out" == *"boxc"*"not stood up"* ]] && [[ "$out" == *"would use:  boxa"* ]]' "$out"
+out=$(APPL="boxc boxd" pool bash "$ORCH" --pick-only -- true)
+check "with none stood up the run is refused"          '[[ "$out" == *"no appliance config at "*"/boxc/runner.env"* ]]' "$out"
+
+echo "runs across two appliances"
+
+reset
+out=$(pool bash "$ORCH" -- 'cat file.txt'); rc=$?
+check "a run on the chosen box passes and names the box" '[ "$rc" = 0 ] && [[ "$out" == *"LIN-TEST-SUMMARY "*"rc=0 "*"counts=none box=boxa"* ]]' "$(printf '%s' "$out" | tail -n 5)"
+check "it started that box and no other"               '[ "$(cat "$FAKE/started")" = boxa ]' "$(cat "$FAKE/started" 2>/dev/null)"
+check "its log and verdict are in the worktree"        '[ -s "$px/tmp/lin-test/latest/done.json" ] && grep -q hello "$px/tmp/lin-test/latest/run.log"'
+check "its claim is gone and the box is marked warm"   '[ -z "$(ls "$PD/claims/boxa")" ] && [ -e "$PD/warm/boxa/$prepo/main" ]'
+check "the folder is on that box only"                 '[ -f "$SCRATCH/boxa/ci/$prepo/main/file.txt" ] && [ ! -e "$SCRATCH/boxb/ci/$prepo" ]'
+
+pids=()
+for i in 1 2 3; do pool bash "$ORCH" -- 'sleep 8' >"$SCRATCH/par$i.out" 2>&1 & pids+=($!); done
+wait "${pids[@]}"
+na=$(cat "$SCRATCH"/par?.out | grep -c '^lin-test: LIN-TEST-SUMMARY .*rc=0 .*box=boxa')
+nb=$(cat "$SCRATCH"/par?.out | grep -c '^lin-test: LIN-TEST-SUMMARY .*rc=0 .*box=boxb')
+nq=$(grep -l 'queued (waits' "$SCRATCH"/par?.out | wc -l)
+check "three runs at once: all pass, on both boxes"    '[ $((na + nb)) = 3 ] && [ "$na" -ge 1 ] && [ "$nb" -ge 1 ]' "boxa=$na boxb=$nb"
+check "two ran side by side and exactly one queued"    '[ "$nq" = 1 ]' "queued=$nq"
+
+reset; touch "$FAKE/nostart/boxa"
+out=$(pool bash "$ORCH" -- true); rc=$?
+check "a box that will not start: the run moves on"    '[ "$rc" = 0 ] && [[ "$out" == *"moving this run"* ]] && [[ "$out" == *"box=boxb"* ]]' "$(printf '%s' "$out" | tail -n 5)"
+reset; power running running; touch "$FAKE/down/10.0.0.1"
+out=$(pool bash "$ORCH" -- true); rc=$?
+check "a box that cannot be reached: the run moves on" '[ "$rc" = 0 ] && [[ "$out" == *"never came up"* ]] && [[ "$out" == *"box=boxb"* ]]' "$(printf '%s' "$out" | tail -n 5)"
+reset; touch "$FAKE/nostart/boxa" "$FAKE/nostart/boxb"
+out=$(pool bash "$ORCH" -- true); rc=$?
+check "no box usable is a loud failure"                '[ "$rc" != 0 ] && [[ "$out" == *"no appliance could be started or reached"* ]]' "$out"
+check "and leaves no claim behind"                     '[ -z "$(find "$PD/claims" -type f)" ]'
+check "nothing here ever stops a box"                  '! grep -nE "az vm (stop|deallocate|delete)|az .* (stop|deallocate)( |$)" "$ORCH" "$RUNNER"'
+kill "$HOLD" 2>/dev/null; wait "$HOLD" 2>/dev/null
 
 echo
 if [ "$fail" -eq 0 ]; then

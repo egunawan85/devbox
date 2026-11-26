@@ -32,25 +32,30 @@ after `--` rather than guessing one silently. Anything after `--` is run instead
 
 What the script does:
 
-- starts the `lin-test` box if it is off (no-op if it is already up),
-- takes the box's run lock — **runs queue**, one at a time, because a check binds fixed
-  local ports on the box; a queued run says so and waits its turn,
+- chooses one of the test boxes (`lin-test`, `lin-test-2`): one no run is using — the
+  one that already has this branch's folder first, then one that is already on — and
+  only when every box is busy, the one with the fewest runs. The log says which,
+- starts that box if it is off (no-op if it is already up); if it cannot be started or
+  reached, the run moves to another box and says so,
+- takes that box's run lock — on one box **runs queue**, one at a time, because a check
+  binds fixed local ports there; a queued run says so and waits its turn,
 - syncs the files git knows about in this worktree (tracked, and untracked-but-not-ignored)
-  to the branch's own folder on the box, which is kept between runs so installs are warm,
+  to the branch's own folder on that box, which is kept between runs so installs are
+  warm. Each box has its own folders: a branch's first run on a box is a cold install,
 - runs the command there and streams its output into the log,
 - fetches the run's log and verdict into the worktree's `tmp/lin-test/<run id>/`
   (`tmp/lin-test/latest` points at the newest),
 - leaves the box running; it turns itself off after it has been idle a while. Never stop
-  or deallocate the box yourself: another session's run may be on it.
+  or deallocate a box yourself: another session's run may be on it.
 
-`--clean` wipes this branch's folder on the box first, for a cold install and build.
+`--clean` wipes this branch's folder on the chosen box first, for a cold install and build.
 
 ## Step 2 — Report the real outcome
 
 The run ends with a machine-readable line — **read this, don't scrape the log**:
 
 ```
-LIN-TEST-SUMMARY repo=anvil branch=my-branch rc=0 seconds=431 counts=vitest runs=2 passed=1312 failed=0 skipped=4
+LIN-TEST-SUMMARY repo=anvil branch=my-branch rc=0 seconds=431 counts=vitest runs=2 passed=1312 failed=0 skipped=4 box=lin-test
 ```
 
 - `rc` is the command's exit code and **is the verdict**. `0` = passed.
@@ -58,6 +63,7 @@ LIN-TEST-SUMMARY repo=anvil branch=my-branch rc=0 seconds=431 counts=vitest runs
   over every test run in it (`runs=`). Report them as passed / failed / skipped.
   `counts=none` means the output had no summary this script recognizes: say the command
   passed or failed and that there are no counts, rather than reporting zeros.
+- `box=` is the test box the run was on. Say it when you report where the check ran.
 - For any failure, give the failing test names and messages from
   `tmp/lin-test/latest/run.log`.
 
@@ -68,8 +74,9 @@ Exit codes that are **not** a verdict on the code — report them as what they a
 - `75` — the run never got to execute (it waited out the lock, or the sync never
   arrived). The log line beginning `runner reported:` says which.
 - `130` — the run was abandoned (the caller was interrupted).
-- "no appliance config at …/runner.env" — the appliance isn't stood up
+- "no appliance config at …/runner.env" — no test box is stood up
   (`devbox -p lin-test up`). Say so plainly.
+- "no appliance could be started or reached" — every box was tried and none answered.
 
 Two things about what the box has, which can make a check behave differently there:
 

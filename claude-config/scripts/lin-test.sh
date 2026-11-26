@@ -4,15 +4,20 @@
 #
 # Several sessions share the devbox, and a project's full check (build, lint, the whole
 # test suite, a database in Docker) fails on timeouts when two run there at once. This
-# script sends the check somewhere else: it wakes the `lin-test` appliance, syncs the
-# current worktree to it, runs one command there under the box's run lock, streams the
-# output back, and exits with the command's exit code. See docs/lin-test.overview.md
-# (why) and docs/lin-test.spec.md (the contract).
+# script sends the check somewhere else: it chooses one of the `lin-test` appliances,
+# wakes it, syncs the current worktree to it, runs one command there under that box's
+# run lock, streams the output back, and exits with the command's exit code. See
+# docs/lin-test.overview.md (why) and docs/lin-test.spec.md (the contract).
 #
-# What it does NOT do: stop the box. The box owns its own lifecycle — its idle monitor
+# Which appliance: one no run is using, if there is one — the one that already has this
+# branch's folder first, then one that is already running; only when every appliance is
+# busy does the run queue, on the one with the fewest runs. An appliance that cannot be
+# started or reached is passed over for the next.
+#
+# What it does NOT do: stop a box. Each box owns its own lifecycle — its idle monitor
 # deallocates it once no run is active and it has been idle IDLE_MINUTES. This script
-# only ever starts it, so one session can never stop the box under another; runs that
-# overlap queue on the box.
+# only ever starts one, so one session can never stop a box under another; runs that
+# overlap on one box queue there.
 #
 # Usage:
 #   lin-test.sh [<worktree>] [--clean] [--cmd '<shell command>'] [-- <command ...>]
@@ -21,6 +26,8 @@
 #     -- ...       the same, as the rest of the command line (joined with spaces)
 #     --clean      wipe this branch's folder on the box first (cold install and build)
 #     --resolve-only   print what would run and where, and exit — contacts nothing
+#     --pick-only      print which appliance a run would use right now, and exit — starts
+#                      nothing and takes no place in a queue
 #
 # With no command, the project says what its check is:
 #   1. LIN_TEST_CMD=<command> in the worktree's committed scripts/lin-test.env; else
@@ -30,41 +37,52 @@
 #
 # What is synced: the files git knows about in the worktree — tracked, plus untracked
 # ones that are not ignored — including uncommitted edits. Ignored files (node_modules,
-# build output, tmp, .env) never leave the devbox. The branch's folder on the box is
-# kept between runs, so installs and builds are warm.
+# build output, tmp, .env) never leave the devbox. The branch's folder on a box is
+# kept between runs, so installs and builds are warm there; each box has its own, and a
+# branch's first run on a box is a cold install.
 #
 # Env tunables (a repo may also set the first one in scripts/lin-test.env):
 #   LIN_TEST_TIMEOUT       limit for the command, seconds (default 2400). Enforced on the
 #                          box; a command past it is stopped and the run exits 124.
 #   LIN_TEST_LOCK_TIMEOUT  longest wait for the box's run lock, seconds (default 3600)
 #   LIN_TEST_POLL          seconds between status polls (default 10)
-#   LIN_TEST_RUNNER_ENV    alternate runner.env path
+#   LIN_TEST_BOOT_TIMEOUT  longest wait for a started box to answer ssh, seconds
+#                          (default 300), before the run moves to another appliance
+#   LIN_TEST_APPLIANCES    the appliances to choose from (default: the list below)
+#   LIN_TEST_RUNNER_ENV    one appliance's runner.env: the run uses that box and no other
 #
-# Reads box identity from ~/.config/devbox/lin-test/runner.env, which `devbox -p lin-test
-# up` writes. If that file is absent, the appliance hasn't been stood up yet.
+# Reads each box's identity from ~/.config/devbox/<appliance>/runner.env, which `devbox
+# -p <appliance> up` writes. An appliance without that file hasn't been stood up yet and
+# is left out; with none stood up, the run is refused.
 #
 # Output: the command's output, live; then the run's log and verdict in
-# <worktree>/tmp/lin-test/<run id>/ (and tmp/lin-test/latest). The exit code is the
+# <worktree>/tmp/lin-test/<run id>/ (and tmp/lin-test/latest). The summary line ends
+# with box=<appliance>, the one the run was on. The exit code is the
 # command's. 124 = timed out, 75 = never got to run (lock or sync), 130 = abandoned.
 # Fails loud; never reports a result without a verdict fetched from the box.
 set -euo pipefail
 
-RUNNER_ENV="${LIN_TEST_RUNNER_ENV:-$HOME/.config/devbox/lin-test/runner.env}"
+# The appliances, in order of preference: each is a devbox profile stood up with
+# `devbox -p <name> up`. Adding one is that command and its name on this line.
+APPLIANCES="${LIN_TEST_APPLIANCES:-lin-test lin-test-2}"
 POLL_S="${LIN_TEST_POLL:-10}"
 LOCK_TIMEOUT_S="${LIN_TEST_LOCK_TIMEOUT:-3600}"
 SYNC_TIMEOUT_S=900
+BOOT_TIMEOUT_S="${LIN_TEST_BOOT_TIMEOUT:-300}"
+WARM_DAYS=14
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 BOX_RUNNER="$HERE/lin-test-run.sh"
 
 die() { echo "lin-test: $*" >&2; exit 1; }
 
 # --- args -----------------------------------------------------------------------
-WORKTREE=""; CLEAN=0; CMD=""; RESOLVE_ONLY=0
+WORKTREE=""; CLEAN=0; CMD=""; RESOLVE_ONLY=0; PICK_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --clean) CLEAN=1; shift ;;
     --cmd) CMD="${2:?--cmd needs a value}"; shift 2 ;;
     --resolve-only) RESOLVE_ONLY=1; shift ;;
+    --pick-only) PICK_ONLY=1; shift ;;
     --) shift; [ -z "$CMD" ] || die "give the command once: either --cmd or after --"; CMD="$*"; break ;;
     -h|--help) sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown flag: $1" ;;
@@ -129,7 +147,7 @@ fi
 
 RUN_TIMEOUT_S="${LIN_TEST_TIMEOUT:-$(repo_setting LIN_TEST_TIMEOUT)}"
 RUN_TIMEOUT_S="${RUN_TIMEOUT_S:-2400}"
-for n in "$RUN_TIMEOUT_S" "$LOCK_TIMEOUT_S" "$POLL_S"; do
+for n in "$RUN_TIMEOUT_S" "$LOCK_TIMEOUT_S" "$POLL_S" "$BOOT_TIMEOUT_S"; do
   [[ $n =~ ^[1-9][0-9]*$ ]] || die "timeouts and the poll interval must be positive whole numbers of seconds, got '$n'"
 done
 
@@ -139,44 +157,158 @@ if [ "$RESOLVE_ONLY" = 1 ]; then
   exit 0
 fi
 
-# --- deps + box identity --------------------------------------------------------
-for bin in az ssh rsync timeout; do command -v "$bin" >/dev/null 2>&1 || die "'$bin' not found on PATH"; done
+# --- deps + the appliances ------------------------------------------------------
+for bin in az ssh rsync timeout flock; do command -v "$bin" >/dev/null 2>&1 || die "'$bin' not found on PATH"; done
 [ -r "$BOX_RUNNER" ] || die "can't find the box-side runner at $BOX_RUNNER"
-[ -r "$RUNNER_ENV" ] || die "no appliance config at $RUNNER_ENV — run 'devbox -p lin-test up' first"
-# The file names the host this script connects to with the machine key, so it may only
-# be one that `devbox up` wrote: somewhere under the operator's devbox state, never a
-# file a caller made up to point the key at a destination of its choosing.
-case "$(readlink -f "$RUNNER_ENV")" in
-  "$HOME/.config/devbox/"*/runner.env) ;;
-  *) die "LIN_TEST_RUNNER_ENV must be a runner.env under $HOME/.config/devbox/ (got $RUNNER_ENV)" ;;
-esac
-# shellcheck disable=SC1090
-. "$RUNNER_ENV"
-: "${RESOURCE_GROUP:?runner.env missing RESOURCE_GROUP}"
-: "${VM_NAME:?runner.env missing VM_NAME}"
-: "${SSH_HOST:?runner.env missing SSH_HOST}"
-: "${CI_DIR:?runner.env missing CI_DIR}"
-: "${SSH_PORT:=2222}"; : "${SSH_USER:=eddyg}"
-# These become an ssh command line, so each is held to the shape it must have.
-[[ $SSH_PORT =~ ^[0-9]{1,5}$ ]]        || die "SSH_PORT in runner.env is not a port number"
-[[ $SSH_HOST =~ ^[A-Za-z0-9.:-]+$ ]] && [[ $SSH_HOST != -* ]] || die "SSH_HOST in runner.env is not a host name or address"
-[[ $SSH_USER =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]] || die "SSH_USER in runner.env is not a user name"
-case "$CI_DIR" in /*) ;; *) die "CI_DIR in runner.env must be an absolute path, got '$CI_DIR'" ;; esac
-case "$CI_DIR" in *[!a-zA-Z0-9/._-]*|*..*) die "CI_DIR in runner.env has characters outside [a-zA-Z0-9/._-]" ;; esac
-AZ_SUB=(); [ -n "${SUBSCRIPTION_ID:-}" ] && AZ_SUB=(--subscription "$SUBSCRIPTION_ID")
-
-# -a: this box never sees a forwarded agent. BatchMode: an unattended run must fail, not
-# prompt. The keepalives turn a silently dead connection into an error within a minute.
-SSH_OPTS=(-p "$SSH_PORT" -a -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
-          -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
-SSH=(ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST")
-RSYNC_RSH="ssh ${SSH_OPTS[*]}"
-REMOTE="$SSH_USER@$SSH_HOST"
-
+DEVBOX_STATE="$HOME/.config/devbox"
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$-$RANDOM"
-STATE_DIR="$CI_DIR/.lin-test"
-RUNDIR="$STATE_DIR/runs/$RUN_ID"
-DEST="$CI_DIR/$REPO/$SAFE_BRANCH"
+
+# Where an appliance's identity is read from: the runner.env `devbox -p <profile> up` wrote.
+env_of() { if [ -n "$PINNED_ENV" ]; then printf '%s' "$PINNED_ENV"; else printf '%s' "$DEVBOX_STATE/$1/runner.env"; fi; }
+
+# use_box PROFILE — make that appliance the one this run talks to: read its runner.env,
+# hold every value to the shape it must have, and build the ssh command and the paths on
+# the box from it. Called again when a run moves to another appliance.
+use_box() {
+  local env; env=$(env_of "$1")
+  unset RESOURCE_GROUP VM_NAME SSH_HOST SSH_PORT SSH_USER SUBSCRIPTION_ID CI_DIR CI_RETAIN_DAYS CI_MIN_FREE_GB IDLE_MINUTES
+  # shellcheck disable=SC1090
+  . "$env"
+  : "${RESOURCE_GROUP:?runner.env missing RESOURCE_GROUP}"
+  : "${VM_NAME:?runner.env missing VM_NAME}"
+  : "${SSH_HOST:?runner.env missing SSH_HOST}"
+  : "${CI_DIR:?runner.env missing CI_DIR}"
+  : "${SSH_PORT:=2222}"; : "${SSH_USER:=eddyg}"
+  # These become an ssh command line, so each is held to the shape it must have.
+  [[ $SSH_PORT =~ ^[0-9]{1,5}$ ]]        || die "SSH_PORT in runner.env is not a port number"
+  [[ $SSH_HOST =~ ^[A-Za-z0-9.:-]+$ ]] && [[ $SSH_HOST != -* ]] || die "SSH_HOST in runner.env is not a host name or address"
+  [[ $SSH_USER =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]] || die "SSH_USER in runner.env is not a user name"
+  case "$CI_DIR" in /*) ;; *) die "CI_DIR in runner.env must be an absolute path, got '$CI_DIR'" ;; esac
+  case "$CI_DIR" in *[!a-zA-Z0-9/._-]*|*..*) die "CI_DIR in runner.env has characters outside [a-zA-Z0-9/._-]" ;; esac
+  AZ_SUB=(); [ -n "${SUBSCRIPTION_ID:-}" ] && AZ_SUB=(--subscription "$SUBSCRIPTION_ID")
+  # -a: this box never sees a forwarded agent. BatchMode: an unattended run must fail, not
+  # prompt. The keepalives turn a silently dead connection into an error within a minute.
+  SSH_OPTS=(-p "$SSH_PORT" -a -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+  SSH=(ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST")
+  RSYNC_RSH="ssh ${SSH_OPTS[*]}"
+  REMOTE="$SSH_USER@$SSH_HOST"
+  BOX="$1"
+  STATE_DIR="$CI_DIR/.lin-test"
+  RUNDIR="$STATE_DIR/runs/$RUN_ID"
+  DEST="$CI_DIR/$REPO/$SAFE_BRANCH"
+}
+power_state() {
+  timeout 60 az vm get-instance-view "${AZ_SUB[@]}" -g "$RESOURCE_GROUP" -n "$VM_NAME" \
+    --query "instanceView.statuses[?starts_with(code,'PowerState')].code | [0]" -o tsv 2>/dev/null || true
+}
+
+# The appliances this run may use. One that has not been stood up (no runner.env) is
+# left out, so the list can name a box before it exists; so is one whose runner.env is
+# not usable. LIN_TEST_RUNNER_ENV pins the run to that one appliance.
+BOXES=(); MISSING=(); BOX=""
+PINNED_ENV="${LIN_TEST_RUNNER_ENV:-}"
+if [ -n "$PINNED_ENV" ]; then
+  [ -r "$PINNED_ENV" ] || die "no appliance config at $PINNED_ENV — run 'devbox -p lin-test up' first"
+  # The file names the host this script connects to with the machine key, so it may only
+  # be one that `devbox up` wrote: somewhere under the operator's devbox state, never a
+  # file a caller made up to point the key at a destination of its choosing.
+  case "$(readlink -f "$PINNED_ENV")" in
+    "$HOME/.config/devbox/"*/runner.env) ;;
+    *) die "LIN_TEST_RUNNER_ENV must be a runner.env under $HOME/.config/devbox/ (got $PINNED_ENV)" ;;
+  esac
+  pinned=$(basename "$(dirname "$(readlink -f "$PINNED_ENV")")")
+  ( use_box "$pinned" ) || exit 1
+  BOXES=("$pinned")
+else
+  first=""
+  for b in $APPLIANCES; do
+    case "$b" in .*|-*|*[!A-Za-z0-9._-]*) die "LIN_TEST_APPLIANCES: '$b' is not a profile name" ;; esac
+    first="${first:-$b}"
+    if [ ! -r "$(env_of "$b")" ]; then MISSING+=("$b"); continue; fi
+    if ( use_box "$b" ); then BOXES+=("$b"); else echo "lin-test: leaving out appliance '$b': its runner.env is not usable" >&2; fi
+  done
+  [ -n "$first" ] || die "LIN_TEST_APPLIANCES names no appliance"
+  [ ${#BOXES[@]} -gt 0 ] || die "no appliance config at $(env_of "$first") — run 'devbox -p $first up' first"
+  for b in ${MISSING[@]+"${MISSING[@]}"}; do
+    echo "lin-test: appliance '$b' is not stood up (no $(env_of "$b")); leaving it out"
+  done
+fi
+
+# --- 1. choose an appliance -----------------------------------------------------
+# Every run is started from this machine, so what each appliance is doing is kept here,
+# with no call to a box that may be off:
+#   claims/<box>/<run id>      one per run in flight on that box — "<pid> <start time>" of
+#                              this script. Removed when the run leaves; one whose process
+#                              is gone is ignored and dropped, so a killed run frees its
+#                              place by dying.
+#   warm/<box>/<repo>/<branch> the box has had this branch's folder synced to it.
+# Choosing and claiming happen under one lock, so runs started in the same instant see
+# each other's claims and spread out instead of all taking the same free box.
+POOL="$DEVBOX_STATE/lin-test-pool"
+proc_start() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
+load_of() { # how many live runs have claimed box $1
+  local n=0 f pid st
+  for f in "$POOL/claims/$1"/*; do
+    [ -f "$f" ] || continue
+    pid=""; st=""; read -r pid st <"$f" 2>/dev/null || true
+    if [[ $pid =~ ^[0-9]+$ ]] && [ -n "$st" ] && [ "$(proc_start "$pid")" = "$st" ]; then n=$((n + 1)); else rm -f -- "$f"; fi
+  done
+  printf '%s' "$n"
+}
+release_claim() { [ -z "$BOX" ] || rm -f -- "$POOL/claims/$BOX/$RUN_ID"; }
+# pick_box [claim] — set BOX to the best appliance not yet tried; with "claim", record
+# this run on it. Returns 1 when none is left. In order:
+#   a box no run is using — one that already has this branch's folder first (a box is
+#     back in about a minute; a cold install takes longer), then one that is already
+#     running, then the list's order;
+#   else the box with the fewest runs — again the one with this branch's folder first.
+TRIED=""; PICTURE=""
+pick_box() {
+  local b n i warm run key best="" best_key="" free=0
+  local -a cand=() loads=()
+  mkdir -p "$POOL/claims" "$POOL/warm" || die "couldn't create $POOL"
+  exec 7>>"$POOL/pick.lock"
+  flock -w 300 7 || die "couldn't take the lock for choosing an appliance ($POOL/pick.lock)"
+  # A box drops a folder unused for its retention period; the record of it goes the same way.
+  find "$POOL/warm" -type f -mtime +"$WARM_DAYS" -delete 2>/dev/null || true
+  PICTURE=""
+  for b in "${BOXES[@]}"; do
+    case " $TRIED " in *" $b "*) continue ;; esac
+    n=$(load_of "$b"); cand+=("$b"); loads+=("$n")
+    if [ "$n" = 0 ]; then free=$((free + 1)); PICTURE="$PICTURE, $b free"; else PICTURE="$PICTURE, $b has $n run(s)"; fi
+  done
+  PICTURE="${PICTURE#, }"
+  if [ ${#cand[@]} = 0 ]; then exec 7>&-; return 1; fi
+  for i in "${!cand[@]}"; do
+    b=${cand[$i]}; n=${loads[$i]}
+    warm=1; [ -e "$POOL/warm/$b/$REPO/$SAFE_BRANCH" ] && warm=0
+    run=0
+    if [ "$n" = 0 ]; then
+      # Whether it is on only matters when there is another free box to prefer it over.
+      if [ "$free" -gt 1 ]; then
+        run=1; [ "$( use_box "$b"; power_state )" = "PowerState/running" ] && run=0
+      fi
+      key=$(printf '0 00000 %d %d %03d' "$warm" "$run" "$i")
+    else
+      key=$(printf '1 %05d %d 0 %03d' "$n" "$warm" "$i")
+    fi
+    if [ -z "$best" ] || [[ $key < $best_key ]]; then best=$b; best_key=$key; fi
+  done
+  BOX=$best
+  if [ "${1:-}" = claim ]; then
+    mkdir -p "$POOL/claims/$BOX" && printf '%s %s\n' "$$" "$(proc_start "$$")" >"$POOL/claims/$BOX/$RUN_ID" \
+      || die "couldn't record this run on $BOX under $POOL/claims"
+  fi
+  exec 7>&-
+}
+
+if [ "$PICK_ONLY" = 1 ]; then
+  pick_box
+  printf 'appliances: %s\nwould use:  %s\n' "$PICTURE" "$BOX"
+  exit 0
+fi
+
 RESULTS_DIR="$WORKTREE/tmp/lin-test/$RUN_ID"
 mkdir -p "$RESULTS_DIR"
 STAGE=$(mktemp -d "$WORKTREE/tmp/lin-test/.stage.XXXXXX")
@@ -189,55 +321,63 @@ cleanup() {
   if [ "$RUNNER_STARTED" = 1 ] && [ "$VERDICT" = 0 ]; then
     timeout 20 "${SSH[@]}" "touch '$RUNDIR/abort'" </dev/null >/dev/null 2>&1 || true
   fi
+  release_claim
 }
 trap cleanup EXIT
 trap 'echo "lin-test: interrupted" >&2; exit 130' INT TERM HUP
 
-# --- 1. wake the box (idempotent; no-op if already running) ---------------------
-power_state() {
-  az vm get-instance-view "${AZ_SUB[@]}" -g "$RESOURCE_GROUP" -n "$VM_NAME" \
-    --query "instanceView.statuses[?starts_with(code,'PowerState')].code | [0]" -o tsv 2>/dev/null || true
-}
-T0=$(date +%s)
-state=$(power_state)
-# Caught mid-way through turning itself off: a start issued now can be lost, so let the
-# deallocation finish first.
-for _ in $(seq 1 36); do
-  [ "$state" = "PowerState/deallocating" ] || [ "$state" = "PowerState/stopping" ] || break
-  echo "lin-test: $VM_NAME is ${state#PowerState/}; waiting for it to finish before starting it…"
-  sleep 5; state=$(power_state)
-done
-COLD=0
-if [ "$state" != "PowerState/running" ]; then
-  COLD=1
-  echo "lin-test: starting $VM_NAME (was: ${state:-unknown})…"
-  az vm start "${AZ_SUB[@]}" -g "$RESOURCE_GROUP" -n "$VM_NAME" >/dev/null || die "az vm start failed"
-fi
-
-# --- 2. wait for SSH; the first contact marks the box busy ----------------------
-echo "lin-test: waiting for ssh $REMOTE:$SSH_PORT…"
-ready=0
-for i in $(seq 1 60); do
-  if "${SSH[@]}" "mkdir -p '$STATE_DIR/runs' && touch '$STATE_DIR/last-activity'" </dev/null >/dev/null 2>&1; then ready=1; break; fi
-  # A box that was "running" a moment ago may have been on its way off: its idle monitor
-  # can deallocate it between the check above and this connection. Start it again
-  # rather than wait out a box that is no longer there.
-  if [ $(( i % 6 )) = 0 ]; then
-    state=$(power_state)
-    if [ "$state" = "PowerState/deallocated" ] || [ "$state" = "PowerState/stopped" ]; then
-      echo "lin-test: $VM_NAME turned itself off meanwhile; starting it again…"
-      az vm start "${AZ_SUB[@]}" -g "$RESOURCE_GROUP" -n "$VM_NAME" >/dev/null || die "az vm start failed"
-      COLD=1
-    fi
+# --- 2. wake it and wait for SSH; the first contact marks the box busy ------------
+# Returns 1, having said why, when the box cannot be started or reached: the run then
+# moves to another appliance. Nothing here ever stops a box.
+wake_box() {
+  local state ready=0 i tries=$(( (BOOT_TIMEOUT_S + 4) / 5 ))
+  T0=$(date +%s)
+  state=$(power_state)
+  # Caught mid-way through turning itself off: a start issued now can be lost, so let the
+  # deallocation finish first.
+  for _ in $(seq 1 36); do
+    [ "$state" = "PowerState/deallocating" ] || [ "$state" = "PowerState/stopping" ] || break
+    echo "lin-test: $VM_NAME is ${state#PowerState/}; waiting for it to finish before starting it…"
+    sleep 5; state=$(power_state)
+  done
+  COLD=0
+  if [ "$state" != "PowerState/running" ]; then
+    COLD=1
+    echo "lin-test: starting $VM_NAME (was: ${state:-unknown})…"
+    az vm start "${AZ_SUB[@]}" -g "$RESOURCE_GROUP" -n "$VM_NAME" >/dev/null || { echo "lin-test: az vm start failed for $VM_NAME" >&2; return 1; }
   fi
-  sleep 5
+  echo "lin-test: waiting for ssh $REMOTE:$SSH_PORT…"
+  for i in $(seq 1 "$tries"); do
+    if "${SSH[@]}" "mkdir -p '$STATE_DIR/runs' && touch '$STATE_DIR/last-activity'" </dev/null >/dev/null 2>&1; then ready=1; break; fi
+    # A box that was "running" a moment ago may have been on its way off: its idle monitor
+    # can deallocate it between the check above and this connection. Start it again
+    # rather than wait out a box that is no longer there.
+    if [ $(( i % 6 )) = 0 ]; then
+      state=$(power_state)
+      if [ "$state" = "PowerState/deallocated" ] || [ "$state" = "PowerState/stopped" ]; then
+        echo "lin-test: $VM_NAME turned itself off meanwhile; starting it again…"
+        az vm start "${AZ_SUB[@]}" -g "$RESOURCE_GROUP" -n "$VM_NAME" >/dev/null || { echo "lin-test: az vm start failed for $VM_NAME" >&2; return 1; }
+        COLD=1
+      fi
+    fi
+    sleep 5
+  done
+  [ "$ready" = 1 ] || { echo "lin-test: ssh to $VM_NAME never came up (box started but unreachable)" >&2; return 1; }
+  [ "$COLD" = 1 ] && echo "lin-test: box up $(( $(date +%s) - T0 ))s after the start request"
+  return 0
+}
+while :; do
+  pick_box claim || die "no appliance could be started or reached (tried:$TRIED)"
+  use_box "$BOX"
+  echo "lin-test: appliance $BOX chosen ($PICTURE)"
+  wake_box && break
+  release_claim; TRIED="$TRIED $BOX"; BOX=""
+  [ "${#BOXES[@]}" -gt 1 ] && echo "lin-test: moving this run to another appliance…" >&2
 done
-[ "$ready" = 1 ] || die "ssh never came up (box started but unreachable)"
-[ "$COLD" = 1 ] && echo "lin-test: box up $(( $(date +%s) - T0 ))s after the start request"
 
 # --- 3. hand over the run: its parameters, the command, and this version's runner --
 {
-  printf 'REPO=%s\nBRANCH=%s\nCLEAN=%s\n' "$REPO" "$SAFE_BRANCH" "$CLEAN"
+  printf 'REPO=%s\nBRANCH=%s\nCLEAN=%s\nBOX=%s\n' "$REPO" "$SAFE_BRANCH" "$CLEAN" "$BOX"
   printf 'RUN_TIMEOUT=%s\nLOCK_TIMEOUT=%s\nSYNC_TIMEOUT=%s\n' "$RUN_TIMEOUT_S" "$LOCK_TIMEOUT_S" "$SYNC_TIMEOUT_S"
   printf 'RETAIN_DAYS=%s\nMIN_FREE_GB=%s\n' "${CI_RETAIN_DAYS:-14}" "${CI_MIN_FREE_GB:-20}"
 } > "$STAGE/params"
@@ -262,7 +402,7 @@ rsync -a -e "$RSYNC_RSH" "$BOX_RUNNER" "$REMOTE:$STATE_DIR/lin-test-run.sh" || d
 RUNNER_STARTED=1
 "${SSH[@]}" "setsid nohup bash '$STATE_DIR/lin-test-run.sh' '$CI_DIR' '$RUN_ID' >'$RUNDIR/runner.out' 2>&1 </dev/null &" </dev/null \
   || die "couldn't start the runner on the box"
-echo "lin-test: run $RUN_ID — $REPO/$SAFE_BRANCH on $VM_NAME"
+echo "lin-test: run $RUN_ID — $REPO/$SAFE_BRANCH on $BOX"
 echo "lin-test: command ($CMD_SOURCE): $CMD"
 
 # One remote call per poll. The reply is three parts: the word "alive" (so an answer from
@@ -291,7 +431,7 @@ while :; do
   [ "$st" = locked ] && break
   waited=$(( $(date +%s) - QSTART ))
   if [ "$st" = queued ] && [ "$announced" = 0 ] && [ "$waited" -ge 4 ]; then
-    echo "lin-test: another run has the box; queued (waits up to ${LOCK_TIMEOUT_S}s)…"; announced=1
+    echo "lin-test: another run has $BOX; queued (waits up to ${LOCK_TIMEOUT_S}s)…"; announced=1
   fi
   # The box gives up on the lock by itself and says so; this is only the backstop behind it.
   if [ "$waited" -ge $(( LOCK_TIMEOUT_S + 120 )) ]; then
@@ -335,6 +475,8 @@ if [ -z "$verdict" ]; then
   st=$(state_of "$(poll)")
   [ "$st" = locked ] || die "the box stopped waiting for this run during the sync (state: ${st:-unknown})"
   "${SSH[@]}" "touch '$RUNDIR/synced'" </dev/null || die "couldn't tell the box the sync is done"
+  # This box now has the branch's folder: later runs of the branch prefer it.
+  mkdir -p "$POOL/warm/$BOX/$REPO" && touch "$POOL/warm/$BOX/$REPO/$SAFE_BRANCH" || true
 
   # --- 6. stream the output and wait for the verdict ----------------------------
   # The stream is a convenience and may drop; the verdict file is what ends the run.
@@ -393,13 +535,13 @@ echo
 [ -n "$summary" ] && echo "lin-test: $summary"
 [ -n "$err" ] && echo "lin-test: runner reported: $err" >&2
 if [ "$rc" = 0 ]; then
-  echo "lin-test: ✅ passed on $VM_NAME ($REPO/$SAFE_BRANCH) in ${secs}s. Log: $RESULTS_DIR/run.log"
+  echo "lin-test: ✅ passed on $BOX ($REPO/$SAFE_BRANCH) in ${secs}s. Log: $RESULTS_DIR/run.log"
 elif [ "$rc" = 124 ]; then
-  echo "lin-test: ⛔ TIMED OUT on $VM_NAME ($REPO/$SAFE_BRANCH) — possible hang; not a verdict on the code. Log: $RESULTS_DIR/run.log" >&2
+  echo "lin-test: ⛔ TIMED OUT on $BOX ($REPO/$SAFE_BRANCH) — possible hang; not a verdict on the code. Log: $RESULTS_DIR/run.log" >&2
 elif [ -n "$err" ]; then
-  echo "lin-test: ❌ the run did not reach a verdict on $VM_NAME ($REPO/$SAFE_BRANCH), exit $rc. Log: $RESULTS_DIR/run.log" >&2
+  echo "lin-test: ❌ the run did not reach a verdict on $BOX ($REPO/$SAFE_BRANCH), exit $rc. Log: $RESULTS_DIR/run.log" >&2
 else
-  echo "lin-test: ❌ FAILED on $VM_NAME ($REPO/$SAFE_BRANCH), exit $rc, after ${secs}s. Log: $RESULTS_DIR/run.log"
+  echo "lin-test: ❌ FAILED on $BOX ($REPO/$SAFE_BRANCH), exit $rc, after ${secs}s. Log: $RESULTS_DIR/run.log"
 fi
 echo "lin-test: box left running; it deallocates itself after ${IDLE_MINUTES:-10} min idle."
 exit "$rc"
