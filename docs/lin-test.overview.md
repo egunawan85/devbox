@@ -14,38 +14,44 @@ minutes with the box to itself. Two of those at once, and tests start failing on
 timeouts. The failures say nothing about the code; they say the box was busy.
 
 A bigger devbox would cost its full price around the clock to absorb a load that is there
-a few minutes at a time. So the check goes somewhere else instead: a second Linux box
+a few minutes at a time. So the check goes somewhere else instead: a separate Linux box
 that is **off unless a run is happening**, the way win-test already works for the suites
-that need Windows.
+that need Windows. There are two of them, alike, so that checks from different branches
+run side by side instead of waiting for each other.
 
 ## Mental model
 
-> **devbox is a workspace I live on. lin-test is an appliance I call.**
+> **devbox is a workspace I live on. lin-test is an appliance I call** — whichever of
+> them is free.
 
 ```
-   Linux devbox (workspace)                          Azure lin-test (appliance)
+   Linux devbox (workspace)                          Azure lin-test, lin-test-2
   ┌──────────────────────────┐                      ┌─────────────────────────────┐
-  │ edit code, git worktrees │   /lin-test          │  Ubuntu 24.04               │
-  │ quick tests locally      │ ────────────────────►│  Node + corepack, Docker    │
-  │                          │  1 wake (az start)   │  Playwright libraries       │
-  │ several sessions at once │  2 take the run lock │  /srv/ci/<repo>/<branch>    │
-  │                          │  3 rsync worktree    │   (kept warm between runs)  │
-  │ log + verdict ◄──────────│  4 run the check     │  no Claude, no vault,       │
-  │  ./tmp/lin-test/<run>/   │  5 fetch the result  │  no secrets                 │
-  └──────────────────────────┘                      └─────────────────────────────┘
-                                                       deallocates itself when idle
+  │ edit code, git worktrees │   /lin-test          │  Ubuntu 24.04               │─┐
+  │ quick tests locally      │ ────────────────────►│  Node + corepack, Docker    │ │
+  │                          │  1 pick a free box   │  Playwright libraries       │ │
+  │ several sessions at once │  2 wake (az start)   │  /srv/ci/<repo>/<branch>    │ │
+  │                          │  3 take its run lock │   (kept warm between runs)  │ │
+  │ which run is on which    │  4 rsync worktree    │  no Claude, no vault,       │ │
+  │ box                      │  5 run the check     │  no secrets                 │ │
+  │ log + verdict ◄──────────│  6 fetch the result  │                             │ │
+  │  ./tmp/lin-test/<run>/   │                      │  one run at a time each     │ │
+  └──────────────────────────┘                      └─────────────────────────────┘ │
+                                                      └─────────────────────────────┘
+                                                      each deallocates itself when idle
 ```
 
 ## How a run feels
 
 I'm in an anvil worktree and want the full check before a PR, and the devbox is busy.
-Claude runs `/lin-test`. The box wakes if it was off, my worktree's files — uncommitted
-edits included — sync to that branch's folder on the box, and `corepack pnpm install
---frozen-lockfile && corepack pnpm check` runs there with four cores to itself. The
-output streams back; at the end there is one line with the exit code and the test
-counts, and the full log is in `./tmp/lin-test/`. If another session's check is already
-on the box, mine waits its turn and says so. Ten idle minutes later the box turns
-itself off.
+Claude runs `/lin-test`. It picks a test box nobody is using — the one that already has
+this branch's folder, if that one is free — and wakes it if it was off. My worktree's
+files — uncommitted edits included — sync to that branch's folder on the box, and
+`corepack pnpm install --frozen-lockfile && corepack pnpm check` runs there with four
+cores to itself. The output streams back; at the end there is one line with the exit
+code, the test counts and which box it was, and the full log is in `./tmp/lin-test/`.
+Only if every box already has someone's check on it does mine wait its turn, and it
+says so. Ten idle minutes later the box turns itself off.
 
 Measured on the appliance in November 2026, with anvil's check (about 1,290 tests):
 
@@ -54,7 +60,8 @@ Measured on the appliance in November 2026, with anvil's check (about 1,290 test
 | Wake from deallocated to the first SSH answer | 35 s |
 | The check, branch folder warm | about 4 min 40 s |
 | The check, first run of a branch (cold install, database image pull) | about 5 min 20 s |
-| A second run asked for at the same moment | its own run plus the first one's |
+| A second run asked for at the same moment | on the other box, side by side |
+| A third at the same moment | queues on one: its own run plus the one ahead of it |
 | Idle to deallocated | 10 to 15 min (ten idle minutes, checked every five) |
 | `devbox -p lin-test up` from nothing | under 5 min |
 
@@ -79,7 +86,7 @@ Measured on the appliance in November 2026, with anvil's check (about 1,290 test
 - **A run is placed from the devbox's own notes.** Every run starts on the devbox, so it
   keeps a note of which runs are on which box, and a run chooses before it contacts
   anything: a box nobody is using, preferring the one that already has the branch's
-  folder; a queue only when both are busy. Asking the boxes instead would mean waking
+  folder; a queue only when all are busy. Asking the boxes instead would mean waking
   one to find out it was busy.
 - **The box owns its own lifecycle.** The runner only ever *starts* it. A timer on the box
   deallocates it once no run holds the lock and it has been idle ten minutes — a real

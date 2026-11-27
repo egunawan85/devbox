@@ -23,7 +23,7 @@ state file** (DigitalOcean itself is the source of truth). Contract:
 | `default` | DigitalOcean / Ubuntu | Workspace: the Linux devbox. | `devbox ssh` |
 | `rg` | Azure / Windows Server | Workspace: a Windows devbox with the .NET build stack. | `devbox -p rg ssh` |
 | `win-test` | Azure / Windows Server | Test appliance for Windows-only suites; off unless a run is happening. | `/win-test` |
-| `lin-test` | Azure / Ubuntu | Credential-free test appliance for a project's full check; off unless a run is happening. | `/lin-test` |
+| `lin-test`, `lin-test-2` | Azure / Ubuntu | Credential-free test appliances for a project's full check, alike; each off unless a run is on it. | `/lin-test` |
 
 ## One-time setup
 
@@ -166,10 +166,11 @@ them, nothing automates them): `az login` (or `doctl auth init`; the `az` *binar
 auto-installed on Linux boxes, the *login* is yours), setting `SUBSCRIPTION_ID`, and
 editing `targets/<profile>.conf`.
 
-## Linux test appliance (the `lin-test` profile)
+## Linux test appliances (the `lin-test` profiles)
 
-A second Linux box that exists to run a project's full check off the shared devbox, and
-is deallocated unless a run is happening. Why: [../docs/lin-test.overview.md](../docs/lin-test.overview.md);
+A Linux box that exists to run a project's full check off the shared devbox, and is
+deallocated unless a run is happening. There are two, `lin-test` and `lin-test-2`, so
+checks run side by side; what follows is the first, and the second is made from it. Why: [../docs/lin-test.overview.md](../docs/lin-test.overview.md);
 contract: [../docs/lin-test.spec.md](../docs/lin-test.spec.md).
 
 ```sh

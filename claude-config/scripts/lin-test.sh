@@ -330,8 +330,8 @@ trap 'echo "lin-test: interrupted" >&2; exit 130' INT TERM HUP
 # Returns 1, having said why, when the box cannot be started or reached: the run then
 # moves to another appliance. Nothing here ever stops a box.
 wake_box() {
-  local state ready=0 i tries=$(( (BOOT_TIMEOUT_S + 4) / 5 ))
-  T0=$(date +%s)
+  local state ready=0 cold=0 i t0 tries=$(( (BOOT_TIMEOUT_S + 4) / 5 ))
+  t0=$(date +%s)
   state=$(power_state)
   # Caught mid-way through turning itself off: a start issued now can be lost, so let the
   # deallocation finish first.
@@ -340,9 +340,8 @@ wake_box() {
     echo "lin-test: $VM_NAME is ${state#PowerState/}; waiting for it to finish before starting it…"
     sleep 5; state=$(power_state)
   done
-  COLD=0
   if [ "$state" != "PowerState/running" ]; then
-    COLD=1
+    cold=1
     echo "lin-test: starting $VM_NAME (was: ${state:-unknown})…"
     az vm start "${AZ_SUB[@]}" -g "$RESOURCE_GROUP" -n "$VM_NAME" >/dev/null || { echo "lin-test: az vm start failed for $VM_NAME" >&2; return 1; }
   fi
@@ -357,13 +356,13 @@ wake_box() {
       if [ "$state" = "PowerState/deallocated" ] || [ "$state" = "PowerState/stopped" ]; then
         echo "lin-test: $VM_NAME turned itself off meanwhile; starting it again…"
         az vm start "${AZ_SUB[@]}" -g "$RESOURCE_GROUP" -n "$VM_NAME" >/dev/null || { echo "lin-test: az vm start failed for $VM_NAME" >&2; return 1; }
-        COLD=1
+        cold=1
       fi
     fi
     sleep 5
   done
   [ "$ready" = 1 ] || { echo "lin-test: ssh to $VM_NAME never came up (box started but unreachable)" >&2; return 1; }
-  [ "$COLD" = 1 ] && echo "lin-test: box up $(( $(date +%s) - T0 ))s after the start request"
+  [ "$cold" = 1 ] && echo "lin-test: box up $(( $(date +%s) - t0 ))s after the start request"
   return 0
 }
 while :; do

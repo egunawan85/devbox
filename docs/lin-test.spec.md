@@ -210,8 +210,8 @@ Each requirement is observable — you can check whether a given setup satisfies
 - **I1** The operator/agent entry point is **`/lin-test`** on the Linux devbox, which calls
   `~/.claude/scripts/lin-test-launch.sh` (detached; logs to the worktree's `./tmp/lin-test/`,
   appends `WRAPPER_EXIT <rc>`) or `~/.claude/scripts/lin-test.sh` (foreground). The
-  launcher holds no lock and refuses nothing: overlapping runs are expected and queue on
-  the box (§C1).
+  launcher holds no lock and refuses nothing: overlapping runs are expected; they
+  spread over the appliances (§P) and queue on one only when all are busy (§C1).
 - **I2** The **box-side runner is not installed on the box**: the orchestrator copies its
   own copy over at the start of every run, so the two halves cannot drift apart.
 - **I3** Each appliance's identity + tunables reach the runner via

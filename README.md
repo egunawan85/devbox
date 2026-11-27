@@ -28,7 +28,7 @@ a run is happening:
 | Appliance | What it runs | Command | Docs |
 |---|---|---|---|
 | `win-test` (Azure / Windows) | Suites that only run on Windows (.NET Framework, LocalDB). | `/win-test` | [overview](docs/win-test.overview.md) · [spec](docs/win-test.spec.md) |
-| `lin-test` (Azure / Ubuntu) | A project's full check, off the shared devbox. Credential-free. | `/lin-test` | [overview](docs/lin-test.overview.md) · [spec](docs/lin-test.spec.md) |
+| `lin-test`, `lin-test-2` (Azure / Ubuntu) | A project's full check, off the shared devbox, on whichever is free. Credential-free. | `/lin-test` | [overview](docs/lin-test.overview.md) · [spec](docs/lin-test.spec.md) |
 
 ## Deploy
 
